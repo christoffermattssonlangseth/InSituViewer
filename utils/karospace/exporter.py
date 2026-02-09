@@ -1,0 +1,5001 @@
+"""
+Export spatial data to standalone HTML viewer.
+
+Creates self-contained HTML files with embedded data and JavaScript
+for interactive visualization of spatial transcriptomics data.
+"""
+
+import base64
+import json
+from pathlib import Path
+from typing import Optional, List, Union
+
+from .data_loader import SpatialDataset
+
+
+def _load_logo_base64() -> Optional[str]:
+    """Load logo from assets as base64 string."""
+    logo_path = Path(__file__).parent.parent / "assets" / "logo.png"
+    if logo_path.exists():
+        with open(logo_path, "rb") as f:
+            return base64.b64encode(f.read()).decode("utf-8")
+    return None
+
+
+# Default color palettes
+DEFAULT_CATEGORICAL_PALETTE = [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+    "#aec7e8", "#ffbb78", "#98df8a", "#ff9896", "#c5b0d5",
+    "#c49c94", "#f7b6d2", "#c7c7c7", "#dbdb8d", "#9edae5",
+    "#393b79", "#5254a3", "#6b6ecf", "#9c9ede", "#637939",
+    "#8ca252", "#b5cf6b", "#cedb9c", "#8c6d31", "#bd9e39",
+    "#e7ba52", "#e7cb94", "#843c39", "#ad494a", "#d6616b",
+    "#e7969c", "#7b4173", "#a55194", "#ce6dbd", "#de9ed6",
+]
+
+HTML_TEMPLATE = '''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{title}</title>
+    {favicon_link}
+    <style>
+        :root {{
+            --background: {background};
+            --text-color: {text_color};
+            --header-bg: {header_bg};
+            --panel-bg: {panel_bg};
+            --border-color: {border_color};
+            --input-bg: {input_bg};
+            --muted-color: {muted_color};
+            --hover-bg: {hover_bg};
+            --graph-color: {graph_color};
+            --accent: #870052;
+            --accent-strong: #4F0433;
+            --accent-warm: #FF876F;
+            --accent-soft: #FEEEEB;
+            --accent-cool: #EDF4F4;
+        }}
+        :root.dark {{
+            --background: #1a1a1a;
+            --text-color: #e0e0e0;
+            --header-bg: #2a2a2a;
+            --panel-bg: #2a2a2a;
+            --border-color: #404040;
+            --input-bg: #333333;
+            --muted-color: #888888;
+            --hover-bg: #3a3a3a;
+            --graph-color: rgba(255, 255, 255, 0.12);
+        }}
+        :root.light {{
+            --background: #f5f5f5;
+            --text-color: #1a1a1a;
+            --header-bg: #ffffff;
+            --panel-bg: #ffffff;
+            --border-color: #e0e0e0;
+            --input-bg: #ffffff;
+            --muted-color: #666666;
+            --hover-bg: #f0f0f0;
+            --graph-color: rgba(0, 0, 0, 0.12);
+        }}
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background:
+                radial-gradient(800px 500px at 10% 0%, rgba(255, 135, 111, 0.08), rgba(0, 0, 0, 0)),
+                radial-gradient(900px 600px at 100% 20%, rgba(135, 0, 82, 0.08), rgba(0, 0, 0, 0)),
+                var(--background);
+            color: var(--text-color);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            transition: background 0.3s, color 0.3s;
+        }}
+        .header {{
+            padding: 8px 16px;
+            background:
+                linear-gradient(90deg, rgba(255, 135, 111, 0.12), rgba(135, 0, 82, 0.08)),
+                var(--header-bg);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 8px;
+            transition: background 0.3s, border-color 0.3s;
+        }}
+        .header-title {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            position: relative;
+        }}
+        .header h1 {{ font-size: 16px; font-weight: 600; }}
+        .info-trigger {{
+            padding: 4px 8px;
+            border: 1px solid var(--border-color);
+            border-radius: 999px;
+            background: var(--panel-bg);
+            color: var(--text-color);
+            font-size: 10px;
+            letter-spacing: 0.03em;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: background 0.2s, border-color 0.2s, color 0.2s;
+        }}
+        .info-trigger:hover {{
+            background: var(--hover-bg);
+            border-color: var(--accent-strong);
+        }}
+        .controls {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
+        .control-group {{ display: flex; align-items: center; gap: 4px; }}
+        #expression-scale-section {{
+            flex-direction: column;
+            align-items: flex-start;
+        }}
+        .control-group label {{ font-size: 11px; color: var(--muted-color); }}
+        select, input[type="text"] {{
+            padding: 5px 8px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background: var(--input-bg);
+            color: var(--text-color);
+            font-size: 12px;
+            transition: background 0.3s, border-color 0.3s, color 0.3s;
+        }}
+        select {{ min-width: 120px; }}
+        input[type="text"] {{ width: 140px; }}
+        select:focus, input:focus {{ outline: none; border-color: var(--accent-strong); box-shadow: 0 0 0 2px rgba(135, 0, 82, 0.15); }}
+        .stats {{ font-size: 11px; color: var(--muted-color); }}
+        .size-control {{
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }}
+        .size-step {{
+            width: 18px;
+            height: 18px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background: var(--input-bg);
+            color: var(--text-color);
+            cursor: pointer;
+            font-size: 12px;
+            line-height: 1;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.2s, border-color 0.2s;
+        }}
+        .size-step:hover {{ background: var(--hover-bg); }}
+
+        /* Theme toggle button */
+        .theme-toggle {{
+            background: var(--input-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 5px 10px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.3s, border-color 0.3s;
+        }}
+        .theme-toggle:hover {{ background: var(--hover-bg); }}
+        .export-btn {{
+            background: var(--input-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 5px 10px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: background 0.3s, border-color 0.3s;
+        }}
+        .export-btn:hover {{ background: var(--hover-bg); }}
+
+        /* Filter bar */
+        .filter-bar {{
+            padding: 6px 16px;
+            background: var(--header-bg);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+            transition: background 0.3s, border-color 0.3s;
+        }}
+        .filter-bar:empty {{ display: none; }}
+        .filter-group {{ display: flex; align-items: center; gap: 4px; }}
+        .filter-group label {{ font-size: 10px; color: var(--muted-color); text-transform: capitalize; }}
+        .filter-chips {{ display: flex; gap: 3px; flex-wrap: wrap; }}
+        .filter-chip {{
+            padding: 2px 6px;
+            font-size: 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            background: var(--input-bg);
+            color: var(--text-color);
+            cursor: pointer;
+            transition: all 0.15s;
+        }}
+        .filter-chip:hover {{ background: var(--hover-bg); }}
+        .filter-chip.active {{ background: var(--accent-strong); color: white; border-color: var(--accent-strong); }}
+        .filter-chip.inactive {{ opacity: 0.4; }}
+
+        .main-container {{ display: flex; flex: 1; min-height: 0; }}
+        .content-column {{
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+        }}
+        .grid-container {{
+            flex: 1;
+            min-height: 0;
+            padding: 8px;
+            overflow: auto;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(clamp({min_panel_size}px, 18vw, {max_panel_size}px), 1fr));
+            gap: 8px;
+            align-content: start;
+        }}
+        .section-panel {{
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            overflow: hidden;
+            cursor: pointer;
+            transition: box-shadow 0.2s, transform 0.2s, background 0.3s, border-color 0.3s;
+        }}
+        .section-panel:hover {{
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            transform: translateY(-2px);
+        }}
+        .section-panel.filtered-out {{ display: none; }}
+        .section-header {{
+            padding: 4px 8px;
+            background: var(--header-bg);
+            border-bottom: 1px solid var(--border-color);
+            font-size: 10px;
+            font-weight: 500;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: background 0.3s, border-color 0.3s;
+        }}
+        .section-header .expand-icon {{ font-size: 10px; opacity: 0.5; }}
+        .section-meta {{ font-size: 8px; color: var(--muted-color); margin-top: 1px; }}
+        .section-canvas {{ display: block; width: 100%; aspect-ratio: 1; }}
+
+        .legend-container {{
+            width: 200px;
+            padding: 12px;
+            background: var(--panel-bg);
+            border-left: 1px solid var(--border-color);
+            overflow-y: auto;
+            font-size: 12px;
+            transition: background 0.3s, border-color 0.3s, width 0.3s, padding 0.3s;
+        }}
+        .legend-container.collapsed {{
+            width: 0;
+            padding: 0;
+            overflow: hidden;
+            border-left: none;
+        }}
+        .color-panel {{
+            width: 240px;
+            padding: 12px;
+            background: var(--panel-bg);
+            border-left: 1px solid var(--border-color);
+            overflow-y: auto;
+            font-size: 12px;
+            transition: background 0.3s, border-color 0.3s, width 0.3s, padding 0.3s;
+        }}
+        .color-panel.collapsed {{
+            width: 0;
+            padding: 0;
+            overflow: hidden;
+            border-left: none;
+        }}
+        .color-panel-header {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid var(--border-color);
+        }}
+        .color-panel-title {{ font-size: 13px; font-weight: 600; }}
+        .color-panel-section {{
+            margin-bottom: 10px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }}
+        .color-panel-section label {{ font-size: 10px; color: var(--muted-color); }}
+        .color-search {{
+            padding: 6px 8px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background: var(--input-bg);
+            color: var(--text-color);
+            font-size: 12px;
+        }}
+        .color-tabs {{
+            display: flex;
+            gap: 6px;
+        }}
+        .color-tab {{
+            flex: 1;
+            padding: 4px 6px;
+            font-size: 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background: var(--input-bg);
+            color: var(--text-color);
+            cursor: pointer;
+            transition: background 0.2s, border-color 0.2s, color 0.2s;
+        }}
+        .color-tab.active {{
+            background: var(--accent-strong);
+            color: white;
+            border-color: var(--accent-strong);
+        }}
+        .color-tab-content {{
+            display: none;
+            flex-direction: column;
+            gap: 8px;
+        }}
+        .color-tab-content.active {{
+            display: flex;
+        }}
+        .scale-controls {{
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+        }}
+        .scale-controls input[type="number"] {{
+            width: 80px;
+        }}
+        .scale-sep {{
+            font-size: 11px;
+            color: var(--muted-color);
+        }}
+        .scale-hint {{
+            font-size: 10px;
+            color: var(--muted-color);
+        }}
+        .info-content {{
+            display: grid;
+            gap: 10px;
+        }}
+        .info-block {{
+            padding: 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: var(--panel-bg);
+        }}
+        .info-title {{
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: var(--muted-color);
+            margin-bottom: 6px;
+        }}
+        .info-text {{
+            font-size: 12px;
+            line-height: 1.5;
+        }}
+        .info-list {{
+            display: grid;
+            gap: 4px;
+            font-size: 12px;
+        }}
+        .info-link {{
+            color: inherit;
+            text-decoration: none;
+            border-bottom: 1px dotted var(--border-color);
+        }}
+        .info-link:hover {{
+            color: var(--accent-strong);
+            border-bottom-color: var(--accent-strong);
+        }}
+        .info-popover {{
+            position: absolute;
+            top: calc(100% + 8px);
+            left: 0;
+            z-index: 10;
+            width: 280px;
+            max-width: calc(100vw - 32px);
+            padding: 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            background: var(--panel-bg);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+            display: none;
+        }}
+        .info-popover.active {{
+            display: block;
+        }}
+        .color-list {{
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            max-height: 220px;
+            overflow-y: auto;
+            padding-right: 2px;
+        }}
+        .color-item {{
+            padding: 5px 8px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background: var(--input-bg);
+            color: var(--text-color);
+            cursor: pointer;
+            font-size: 11px;
+            transition: background 0.2s, border-color 0.2s;
+        }}
+        .color-item:hover {{ background: var(--hover-bg); }}
+        .color-item.active {{
+            background: var(--accent-strong);
+            color: white;
+            border-color: var(--accent-strong);
+        }}
+        .color-aggregation {{
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            font-size: 11px;
+        }}
+        .color-aggregation.collapsed {{
+            display: none;
+        }}
+        .marker-genes {{
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 8px;
+            background: var(--input-bg);
+            max-height: 420px;
+            overflow: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            resize: vertical;
+        }}
+        .marker-search {{
+            padding: 6px 8px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background: var(--input-bg);
+            color: var(--text-color);
+            font-size: 11px;
+        }}
+        .marker-group-title {{ font-size: 11px; font-weight: 600; }}
+        .marker-genes-list {{
+            font-size: 10px;
+            color: var(--muted-color);
+            line-height: 1.4;
+            word-break: break-word;
+        }}
+        .agg-group {{
+            padding: 6px;
+            border-radius: 6px;
+            background: rgba(135, 0, 82, 0.06);
+            border: 1px solid var(--border-color);
+        }}
+        .agg-group-title {{ font-weight: 600; margin-bottom: 4px; }}
+        .agg-group-meta {{ font-size: 10px; color: var(--muted-color); margin-bottom: 4px; }}
+        .agg-row {{
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin: 2px 0;
+        }}
+        .agg-dot {{
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+        }}
+        .agg-label {{ flex: 1; }}
+        .agg-value {{ font-variant-numeric: tabular-nums; }}
+        .trend-table {{
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 10px;
+        }}
+        .trend-table th, .trend-table td {{
+            text-align: left;
+            padding: 4px 6px;
+            border-bottom: 1px solid var(--border-color);
+            font-variant-numeric: tabular-nums;
+        }}
+        .trend-table th {{ color: var(--muted-color); font-weight: 600; }}
+        .interaction-target {{
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }}
+        .interaction-markers {{
+            font-size: 10px;
+            color: var(--muted-color);
+            line-height: 1.35;
+        }}
+
+        /* Dotplot */
+        .dotplot-controls {{
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }}
+        .dotplot-grid {{
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: var(--input-bg);
+            overflow: auto;
+            max-height: 420px;
+        }}
+        .dotplot-row {{
+            display: grid;
+            grid-template-columns: 180px repeat(var(--dotplot-cols, 1), 24px);
+            align-items: center;
+            gap: 6px;
+            padding: 6px 8px;
+            border-bottom: 1px solid var(--border-color);
+        }}
+        .dotplot-row:last-child {{ border-bottom: none; }}
+        .dotplot-row.dotplot-header {{
+            position: sticky;
+            top: 0;
+            background: var(--panel-bg);
+            z-index: 1;
+        }}
+        .dotplot-label {{
+            font-size: 10px;
+            color: var(--text-color);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }}
+        .dotplot-gene {{
+            font-size: 9px;
+            color: var(--muted-color);
+            text-align: center;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }}
+        .dotplot-dot {{
+            width: 20px;
+            height: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }}
+        .legend-title {{
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid var(--border-color);
+        }}
+        .legend-actions {{ display: flex; gap: 6px; margin-bottom: 8px; }}
+        .legend-btn {{
+            flex: 1;
+            padding: 3px 6px;
+            font-size: 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 3px;
+            background: var(--input-bg);
+            color: var(--text-color);
+            cursor: pointer;
+            transition: background 0.3s, border-color 0.3s, color 0.3s;
+        }}
+        .legend-btn:hover {{ background: var(--hover-bg); }}
+        .legend-btn.active {{
+            background: var(--accent-strong);
+            color: #fff;
+            border-color: var(--accent-strong);
+        }}
+        .legend-item {{
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 3px 6px;
+            margin: 1px 0;
+            font-size: 11px;
+            cursor: pointer;
+            border-radius: 3px;
+            transition: background 0.15s;
+        }}
+        .legend-item:hover {{ background: var(--hover-bg); }}
+        .legend-item.hidden {{ opacity: 0.3; text-decoration: line-through; }}
+        .legend-item.spotlight {{
+            background: color-mix(in srgb, var(--accent-strong) 10%, transparent);
+            box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-strong) 35%, transparent);
+        }}
+        .legend-item.dimmed {{ opacity: 0.45; }}
+        .legend-color {{
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            flex-shrink: 0;
+            border: 2px solid transparent;
+        }}
+        .legend-item.hidden .legend-color {{ border-color: var(--muted-color); background: transparent !important; }}
+        .legend-item.selected {{
+            border-color: var(--accent-strong);
+            box-shadow: 0 0 0 2px rgba(135, 0, 82, 0.2);
+        }}
+        .legend-item.selected .legend-color {{
+            border-color: var(--accent-strong);
+        }}
+        .colorbar {{ width: 16px; height: 150px; margin: 8px auto; border-radius: 2px; }}
+        .colorbar-labels {{
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            height: 150px;
+            font-size: 10px;
+            color: var(--muted-color);
+            margin-left: 6px;
+        }}
+        .colorbar-container {{ display: flex; align-items: stretch; justify-content: center; }}
+
+        /* Modal styles */
+        .modal-overlay {{
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.7);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }}
+        .modal-overlay.active {{ display: flex; }}
+        .modal-content {{
+            background: var(--panel-bg);
+            border-radius: 12px;
+            width: 90vw;
+            height: 90vh;
+            max-width: 1400px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            transition: background 0.3s;
+        }}
+        .modal-header {{
+            padding: 12px 16px;
+            background: var(--header-bg);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: background 0.3s, border-color 0.3s;
+        }}
+        .modal-header h2 {{ font-size: 15px; font-weight: 600; }}
+        .modal-header .modal-meta {{ font-size: 11px; color: var(--muted-color); margin-left: 10px; }}
+        .modal-close {{
+            background: none;
+            border: none;
+            font-size: 22px;
+            cursor: pointer;
+            color: var(--text-color);
+            padding: 2px 6px;
+            border-radius: 4px;
+        }}
+        .modal-close:hover {{ background: var(--hover-bg); }}
+        .modal-body {{ flex: 1; display: flex; overflow: hidden; }}
+        .modal-canvas-container {{ flex: 1; position: relative; overflow: hidden; }}
+        .modal-canvas {{ position: absolute; top: 0; left: 0; width: 100%; height: 100%; }}
+        .modal-controls {{
+            position: absolute;
+            bottom: 12px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 6px;
+            background: var(--header-bg);
+            padding: 6px 10px;
+            border-radius: 6px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+            transition: background 0.3s;
+        }}
+        .modal-controls button {{
+            padding: 5px 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background: var(--input-bg);
+            color: var(--text-color);
+            cursor: pointer;
+            font-size: 12px;
+            transition: background 0.3s, border-color 0.3s, color 0.3s;
+        }}
+        .modal-controls button:hover {{ background: var(--hover-bg); }}
+        .modal-legend {{ width: 180px; padding: 12px; border-left: 1px solid var(--border-color); overflow-y: auto; transition: border-color 0.3s; }}
+        .zoom-info {{ font-size: 10px; color: var(--muted-color); margin-left: 6px; }}
+
+        .no-results {{
+            grid-column: 1 / -1;
+            text-align: center;
+            padding: 40px;
+            color: var(--muted-color);
+            font-size: 14px;
+        }}
+
+        /* Tooltip styles */
+        .cell-tooltip {{
+            position: fixed;
+            background: var(--header-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 6px 10px;
+            font-size: 11px;
+            pointer-events: none;
+            z-index: 2000;
+            display: none;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            max-width: 250px;
+            transition: background 0.3s, border-color 0.3s;
+        }}
+        .cell-tooltip.visible {{ display: block; }}
+        .cell-tooltip-color {{
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 6px;
+            vertical-align: middle;
+        }}
+        .cell-tooltip-label {{ font-weight: 500; }}
+        .cell-tooltip-value {{ color: var(--muted-color); margin-left: 4px; }}
+
+        /* UMAP panel styles */
+        .umap-panel {{
+            width: 320px;
+            max-width: min(560px, 90vw);
+            aspect-ratio: 1 / 1;
+            height: auto;
+            margin: 0;
+            position: absolute;
+            z-index: 20;
+            background: var(--panel-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.12);
+            overflow: hidden;
+            display: none;
+            flex-direction: column;
+            transition: background 0.3s, border-color 0.3s;
+        }}
+        .umap-panel.dock-top-right {{ top: 8px; right: 8px; left: auto; bottom: auto; }}
+        .umap-panel.dock-top-left {{ top: 8px; left: 8px; right: auto; bottom: auto; }}
+        .umap-panel.dock-bottom-right {{ bottom: 8px; right: 8px; left: auto; top: auto; }}
+        .umap-panel.dock-bottom-left {{ bottom: 8px; left: 8px; right: auto; top: auto; }}
+        .umap-panel.visible {{ display: flex; }}
+        .umap-header {{
+            padding: 8px 12px;
+            background: var(--header-bg);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: background 0.3s, border-color 0.3s;
+        }}
+        .umap-header h3 {{ font-size: 13px; font-weight: 600; }}
+        .umap-header-actions {{
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }}
+        .umap-canvas-container {{
+            flex: 1;
+            position: relative;
+            min-height: 0;
+        }}
+        .umap-canvas {{
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }}
+        .umap-controls {{
+            position: absolute;
+            left: 8px;
+            right: 8px;
+            bottom: 8px;
+            padding: 6px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            background: color-mix(in srgb, var(--header-bg) 88%, transparent);
+            backdrop-filter: blur(6px);
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            align-items: center;
+            transition: border-color 0.3s, background 0.3s;
+        }}
+        .umap-btn {{
+            padding: 5px 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background: var(--input-bg);
+            color: var(--text-color);
+            cursor: pointer;
+            font-size: 11px;
+            transition: background 0.3s, border-color 0.3s, color 0.3s;
+        }}
+        .umap-btn:hover {{ background: var(--hover-bg); }}
+        .umap-btn.active {{
+            background: var(--accent-strong);
+            color: white;
+            border-color: var(--accent-strong);
+        }}
+        .umap-selection-info {{
+            position: absolute;
+            top: 8px;
+            left: 8px;
+            font-size: 11px;
+            color: var(--muted-color);
+            padding: 4px 8px;
+            border: 1px solid var(--border-color);
+            border-radius: 999px;
+            background: color-mix(in srgb, var(--header-bg) 88%, transparent);
+            backdrop-filter: blur(6px);
+        }}
+        .umap-toggle, .legend-toggle, .graph-toggle {{
+            background: var(--input-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 5px 10px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: background 0.3s, border-color 0.3s;
+        }}
+        .umap-toggle:hover, .legend-toggle:hover, .graph-toggle:hover {{ background: var(--hover-bg); }}
+        .umap-toggle.active, .legend-toggle.active, .graph-toggle.active {{
+            background: var(--accent-strong);
+            color: white;
+            border-color: var(--accent-strong);
+        }}
+        .graph-toggle:disabled {{
+            opacity: 0.5;
+            cursor: not-allowed;
+        }}
+        .color-toggle {{
+            background: var(--input-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 5px 10px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: background 0.3s, border-color 0.3s;
+        }}
+        .color-toggle:hover {{ background: var(--hover-bg); }}
+        .color-toggle.active {{
+            background: var(--accent-strong);
+            color: white;
+            border-color: var(--accent-strong);
+        }}
+
+        /* Selection highlight */
+        .selection-highlight {{
+            stroke: #ffd700;
+            stroke-width: 2px;
+        }}
+
+        /* Footer logo */
+        .footer-logo {{
+            position: fixed;
+            bottom: 10px;
+            right: 10px;
+            opacity: 0.7;
+            transition: opacity 0.2s, transform 0.2s;
+            z-index: 100;
+            font-size: 11px;
+            letter-spacing: 0.18em;
+            text-transform: uppercase;
+            padding: 6px 10px;
+            border-radius: 999px;
+            background: rgba(135, 0, 82, 0.12);
+            color: var(--text-color);
+            border: 1px solid var(--border-color);
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+        }}
+        .footer-logo:hover {{
+            opacity: 1;
+            transform: translateY(-1px);
+        }}
+        .footer-link {{
+            letter-spacing: 0.12em;
+            text-decoration: none;
+            color: var(--text-color);
+            opacity: 0.75;
+            border-left: 1px solid var(--border-color);
+            padding-left: 10px;
+        }}
+        .footer-link:hover {{ opacity: 1; }}
+        .loading-overlay {{
+            position: fixed;
+            inset: 0;
+            background:
+                radial-gradient(140px 140px at 50% 28%, rgba(135, 0, 82, 0.35), rgba(0, 0, 0, 0)),
+                radial-gradient(520px 360px at 50% 60%, rgba(255, 135, 111, 0.18), rgba(0, 0, 0, 0)),
+                linear-gradient(180deg, #0b0508 0%, #14070f 60%, #1a0a14 100%);
+            color: #f5dbe7;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            z-index: 1000;
+            text-transform: uppercase;
+            letter-spacing: 0.18em;
+        }}
+        .loading-cloud {{
+            position: relative;
+            width: 140px;
+            height: 90px;
+            filter: drop-shadow(0 0 12px rgba(135, 0, 82, 0.6));
+        }}
+        .loading-dot {{
+            position: absolute;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: radial-gradient(circle at 30% 30%, #ffe3ef 0%, #ffb39f 45%, #870052 100%);
+            opacity: 0.9;
+            box-shadow: 0 0 8px rgba(135, 0, 82, 0.9);
+            animation: drift 2.6s ease-in-out infinite;
+        }}
+        .loading-dot:nth-child(1) {{ left: 10px; top: 18px; animation-delay: 0s; }}
+        .loading-dot:nth-child(2) {{ left: 34px; top: 46px; animation-delay: 0.2s; }}
+        .loading-dot:nth-child(3) {{ left: 62px; top: 20px; animation-delay: 0.4s; }}
+        .loading-dot:nth-child(4) {{ left: 88px; top: 52px; animation-delay: 0.1s; }}
+        .loading-dot:nth-child(5) {{ left: 114px; top: 28px; animation-delay: 0.3s; }}
+        .loading-dot:nth-child(6) {{ left: 22px; top: 72px; animation-delay: 0.5s; }}
+        .loading-dot:nth-child(7) {{ left: 72px; top: 72px; animation-delay: 0.6s; }}
+        .loading-dot:nth-child(8) {{ left: 48px; top: 6px; animation-delay: 0.7s; }}
+        .loading-dot:nth-child(9) {{ left: 96px; top: 8px; animation-delay: 0.8s; }}
+        .loading-dot:nth-child(10) {{ left: 6px; top: 54px; animation-delay: 0.9s; }}
+        .loading-dot:nth-child(11) {{ left: 126px; top: 62px; animation-delay: 1.0s; }}
+        .loading-dot:nth-child(12) {{ left: 58px; top: 40px; animation-delay: 1.1s; }}
+        @keyframes drift {{
+            0% {{ transform: translate(0, 0) scale(1); opacity: 0.6; }}
+            50% {{ transform: translate(0, -10px) scale(1.25); opacity: 1; }}
+            100% {{ transform: translate(0, 0) scale(1); opacity: 0.6; }}
+        }}
+        .loading-text {{
+            font-size: 11px;
+            color: rgba(245, 219, 231, 0.7);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        }}
+    </style>
+</head>
+<body>
+    <div class="loading-overlay" id="loading-overlay">
+        <div class="loading-cloud" aria-hidden="true">
+            <span class="loading-dot"></span>
+            <span class="loading-dot"></span>
+            <span class="loading-dot"></span>
+            <span class="loading-dot"></span>
+            <span class="loading-dot"></span>
+            <span class="loading-dot"></span>
+            <span class="loading-dot"></span>
+            <span class="loading-dot"></span>
+            <span class="loading-dot"></span>
+            <span class="loading-dot"></span>
+            <span class="loading-dot"></span>
+            <span class="loading-dot"></span>
+        </div>
+        <div class="loading-text">Loading data...</div>
+    </div>
+    <div class="header">
+        <div class="header-title">
+            <h1>{title}</h1>
+            <button class="info-trigger" id="info-trigger" type="button" title="Viewer info">Info</button>
+            <div class="info-popover" id="info-popover" aria-hidden="true">
+                <div class="info-content">{viewer_info_html}</div>
+            </div>
+        </div>
+        <div class="controls">
+            <div class="control-group">
+                <label>Color:</label>
+                <select id="color-select"></select>
+            </div>
+            <div class="control-group">
+                <label>Gene:</label>
+                <input type="text" id="gene-input" placeholder="e.g. Cd4, Gfap..." list="gene-list">
+                <datalist id="gene-list"></datalist>
+            </div>
+            <div class="control-group" id="expression-scale-section" style="display: none;">
+                <label>Scale:</label>
+                <div class="scale-controls">
+                    <input type="number" id="expr-vmin" step="0.001" placeholder="min">
+                    <span class="scale-sep">to</span>
+                    <input type="number" id="expr-vmax" step="0.001" placeholder="max">
+                    <button class="legend-btn" id="expr-auto" type="button">Auto (1-99%)</button>
+                </div>
+                <div class="scale-hint" id="expr-scale-hint">Auto scale: 1-99 percentile.</div>
+            </div>
+            <div class="control-group">
+                <label>Size:</label>
+                <div class="size-control">
+                    <button class="size-step" id="spot-size-dec" type="button">−</button>
+                    <input type="range" id="spot-size" min="0.1" max="8" step="0.1" value="{spot_size}" style="width:80px">
+                    <button class="size-step" id="spot-size-inc" type="button">+</button>
+                </div>
+            </div>
+            <button class="umap-toggle" id="umap-toggle" title="Toggle UMAP view" style="display: none;">
+                UMAP
+            </button>
+            <button class="legend-toggle active" id="legend-toggle" title="Toggle legend panel">
+                Legend
+            </button>
+            <button class="color-toggle" id="color-toggle" title="Toggle color explorer">
+                Insights
+            </button>
+            <button class="graph-toggle" id="graph-toggle" title="Toggle neighborhood graph" style="display: none;">
+                Graph
+            </button>
+            <button class="graph-toggle" id="neighbor-hover-toggle" title="Toggle neighbor rings on hover" style="display: none;">
+                Neighbors
+            </button>
+            <select id="neighbor-hop-select" title="Neighbor hop display" style="display: none; min-width: 90px;">
+                <option value="1">1-hop</option>
+                <option value="2">2-hop</option>
+                <option value="3">3-hop</option>
+                <option value="all" selected>All hops</option>
+            </select>
+            <button class="export-btn" id="screenshot-btn" title="Download screenshot">
+                Screenshot
+            </button>
+            <button class="theme-toggle" id="theme-toggle" title="Toggle dark/light mode">
+                <span id="theme-icon">{theme_icon}</span>
+            </button>
+        </div>
+        <div class="stats"><span id="stats-text"></span></div>
+    </div>
+
+    <div class="filter-bar" id="filter-bar"></div>
+
+    <div class="main-container">
+        <div class="content-column" id="content-column">
+            <div class="grid-container" id="grid"></div>
+            <div class="umap-panel dock-top-right" id="umap-panel">
+                <div class="umap-header">
+                    <h3>UMAP</h3>
+                    <div class="umap-header-actions">
+                        <button class="umap-btn" id="umap-dock-btn" title="Cycle panel corner">TR</button>
+                        <button class="umap-btn" id="umap-panel-smaller" title="Smaller panel">−</button>
+                        <button class="umap-btn" id="umap-panel-larger" title="Larger panel">+</button>
+                    </div>
+                </div>
+                <div class="umap-canvas-container" id="umap-canvas-container">
+                    <canvas class="umap-canvas" id="umap-canvas"></canvas>
+                    <div class="umap-controls">
+                        <button class="umap-btn" id="magic-wand-btn" title="Draw to select cells">Magic Wand</button>
+                        <button class="umap-btn" id="clear-selection-btn" title="Clear selection">Clear</button>
+                        <span style="margin-left: 6px; font-size: 11px; color: var(--muted-color);">Size:</span>
+                        <div class="size-control">
+                            <button class="size-step" id="umap-spot-size-dec" type="button">−</button>
+                            <input type="range" id="umap-spot-size" min="0.1" max="6" step="0.1" value="2" style="width: 60px;">
+                            <button class="size-step" id="umap-spot-size-inc" type="button">+</button>
+                        </div>
+                        <span id="umap-spot-size-label" style="font-size: 11px; min-width: 20px;">2</span>
+                    </div>
+                    <div class="umap-selection-info" id="umap-selection-info">No cells selected</div>
+                </div>
+            </div>
+        </div>
+        <div class="color-panel collapsed" id="color-panel"></div>
+        <div class="legend-container" id="legend"></div>
+    </div>
+
+    <div class="modal-overlay" id="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div style="display: flex; align-items: center;">
+                    <h2 id="modal-title">Section</h2>
+                    <span class="modal-meta" id="modal-meta"></span>
+                    <span class="zoom-info" id="zoom-info">100%</span>
+                </div>
+                <button class="modal-close" id="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="modal-canvas-container" id="modal-canvas-container">
+                    <canvas class="modal-canvas" id="modal-canvas"></canvas>
+                    <div class="modal-controls">
+                        <button id="zoom-in">+ Zoom</button>
+                        <button id="zoom-out">- Zoom</button>
+                        <button id="zoom-reset">Reset</button>
+                        <button class="graph-toggle" id="modal-graph-toggle" title="Toggle neighborhood graph" style="display: none;">Graph</button>
+                        <button class="graph-toggle" id="modal-neighbor-hover-toggle" title="Toggle neighbor rings on hover" style="display: none;">Neighbors</button>
+                        <select id="modal-neighbor-hop-select" title="Neighbor hop display" style="display: none; min-width: 90px;">
+                            <option value="1">1-hop</option>
+                            <option value="2">2-hop</option>
+                            <option value="3">3-hop</option>
+                            <option value="all" selected>All hops</option>
+                        </select>
+                        <button class="graph-toggle" id="modal-type-toggle" title="Select a category by clicking a cell">Select type</button>
+                        <button class="graph-toggle" id="modal-type-clear" title="Clear selected type">Clear type</button>
+                        <span style="margin-left: 10px; font-size: 11px; color: {muted_color};">Size:</span>
+                        <div class="size-control">
+                            <button class="size-step" id="modal-spot-size-dec" type="button">−</button>
+                            <input type="range" id="modal-spot-size" min="0.1" max="12" step="0.1" value="{spot_size}" style="width: 80px;">
+                            <button class="size-step" id="modal-spot-size-inc" type="button">+</button>
+                        </div>
+                        <span id="modal-spot-size-label" style="font-size: 11px; min-width: 24px;">{spot_size}</span>
+                    </div>
+                </div>
+                <div class="modal-legend" id="modal-legend"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="cell-tooltip" id="cell-tooltip"></div>
+
+    <script>
+    (function() {{
+        function hide() {{
+            const loader = document.getElementById('loading-overlay');
+            if (loader) loader.style.display = 'none';
+        }}
+        function showError(msg) {{
+            hide();
+            const el = document.createElement('div');
+            el.style.position = 'fixed';
+            el.style.left = '16px';
+            el.style.right = '16px';
+            el.style.bottom = '16px';
+            el.style.padding = '10px 12px';
+            el.style.background = 'rgba(20, 7, 15, 0.92)';
+            el.style.border = '1px solid rgba(255,255,255,0.15)';
+            el.style.borderRadius = '10px';
+            el.style.color = '#f5dbe7';
+            el.style.fontSize = '12px';
+            el.style.zIndex = '2000';
+            el.textContent = msg;
+            document.body.appendChild(el);
+        }}
+        window.addEventListener('error', (e) => {{
+            showError(`KaroSpace failed to start: ${{e.message || 'Unknown error'}} (open DevTools console).`);
+        }});
+        window.addEventListener('unhandledrejection', (e) => {{
+            showError('KaroSpace failed to start: Unhandled promise rejection (open DevTools console).');
+        }});
+        // Fallback: never keep the loader up forever.
+        setTimeout(() => {{
+            const loader = document.getElementById('loading-overlay');
+            if (loader && loader.style.display !== 'none') {{
+                showError('Still loading… If this persists, open DevTools console for errors.');
+            }}
+        }}, 4000);
+    }})();
+    </script>
+
+    <script id="karospace-data" type="application/json">{data_json}</script>
+    <script>
+    const DATA = JSON.parse(document.getElementById('karospace-data').textContent);
+    const PALETTE = {palette_json};
+    const METADATA_LABELS = {metadata_labels_json};
+    const OUTLINE_BY = {outline_by_json};
+    const VIEWER_INFO_HTML = {viewer_info_html_json};
+
+    const USER_AGENT = navigator.userAgent || '';
+    const IS_SAFARI = /Safari/i.test(USER_AGENT) &&
+        !/Chrome|Chromium|Edg|OPR|CriOS|FxiOS|Android/i.test(USER_AGENT);
+    const SAFARI_DPR_CAP = 1.0;
+
+    function getRenderDpr() {{
+        const dpr = window.devicePixelRatio || 1;
+        if (IS_SAFARI) return Math.max(1, Math.min(dpr, SAFARI_DPR_CAP));
+        return dpr;
+    }}
+
+    // Outline color overrides (used for course by default)
+    const OUTLINE_COLOR_OVERRIDES = {{
+        'peak_I': 'rgba(228, 26, 28, 0.5)',
+        'peak_II': 'rgba(55, 126, 184, 0.5)',
+        'peak_III': 'rgba(77, 175, 74, 0.5)',
+        'naive': 'rgba(152, 78, 163, 0.5)',
+        'remission': 'rgba(255, 127, 0, 0.5)',
+        'chronic': 'rgba(255, 255, 51, 0.5)',
+        'acute': 'rgba(166, 86, 40, 0.5)',
+        'control': 'rgba(153, 153, 153, 0.5)',
+    }};
+
+    function getOutlineColor(value) {{
+        if (!value || !OUTLINE_BY) return null;
+        if (OUTLINE_BY === 'course') {{
+            if (OUTLINE_COLOR_OVERRIDES[value]) return OUTLINE_COLOR_OVERRIDES[value];
+            const lowerValue = value.toLowerCase();
+            for (const [key, color] of Object.entries(OUTLINE_COLOR_OVERRIDES)) {{
+                if (key.toLowerCase() === lowerValue) return color;
+            }}
+        }}
+        // Generate a consistent color for unknown values
+        let hash = 0;
+        for (let i = 0; i < value.length; i++) {{
+            hash = value.charCodeAt(i) + ((hash << 5) - hash);
+        }}
+        const hue = Math.abs(hash) % 360;
+        return `hsla(${{hue}}, 65%, 50%, 0.5)`;
+    }}
+
+    // State
+    let currentColor = DATA.initial_color;
+    let currentGene = null;
+    const geneScaleOverrides = {{}};
+    const geneScaleAuto = {{}};
+    const GENE_SCALE_PMIN = 1;
+    const GENE_SCALE_PMAX = 99;
+    const GENE_SCALE_MAX_SAMPLES = 200000;
+    let hiddenCategories = new Set();
+    let linkedSpotlightEnabled = false;
+    let spotlightPinnedCategory = null;
+    let spotlightHoverCategory = null;
+    let spotSize = {spot_size};
+    let activeFilters = {{}};  // e.g. {{ course: new Set(['peak_I', 'peak_III']) }}
+    let currentTheme = '{initial_theme}';
+    let showGraph = false;
+    let hoverNeighbors = null;
+    let neighborHoverEnabled = false;
+    let neighborHopMode = 'all';
+    const MAX_HOVER_HOPS = 3;
+    const HOVER_COLORS = [
+        'rgba(255, 165, 0, 0.9)',
+        'rgba(0, 200, 255, 0.9)',
+        'rgba(255, 105, 180, 0.9)',
+    ];
+    const expandedAggGroups = new Set();
+    const expandedNeighborGroups = new Set();
+    let interactionSourceCategory = null;
+    let dotplotRenderToken = 0;
+
+    // Modal state
+    let modalSection = null;
+    let modalZoom = 1;
+    let modalPanX = 0, modalPanY = 0;
+    let modalSpotSize = {spot_size};
+    let isDragging = false;
+    let dragStartX = 0, dragStartY = 0;
+    let lastPanX = 0, lastPanY = 0;
+    let modalTypeSelectEnabled = false;
+    let modalSelectedCategory = null;
+
+    // UMAP state
+    let umapVisible = false;
+    let umapZoom = 1;
+    let umapPanX = 0, umapPanY = 0;
+    let umapSpotSize = 2;
+    let umapPanelDock = 'top-right';
+    let umapPanelSize = 320;
+    const UMAP_PANEL_DOCKS = ['top-right', 'bottom-right', 'bottom-left', 'top-left'];
+    const UMAP_PANEL_SIZE_STEP = 24;
+    const UMAP_PANEL_MIN_SIZE = 220;
+    const UMAP_PANEL_MAX_SIZE = 560;
+    const UMAP_PANEL_STORAGE_KEY = 'spatial-viewer-umap-panel';
+    let isUmapDragging = false;
+    let umapDragStartX = 0, umapDragStartY = 0;
+    let umapLastPanX = 0, umapLastPanY = 0;
+
+    // Selection state
+    let magicWandActive = false;
+    let isDrawingLasso = false;
+    let lassoPath = [];  // Array of {{x, y}} points
+    let selectedCells = new Set();  // Set of "sectionId:cellIdx" strings
+
+    // Theme toggle
+    function toggleTheme() {{
+        currentTheme = currentTheme === 'light' ? 'dark' : 'light';
+        document.documentElement.classList.remove('light', 'dark');
+        document.documentElement.classList.add(currentTheme);
+        document.getElementById('theme-icon').textContent = currentTheme === 'dark' ? '☀️' : '🌙';
+        localStorage.setItem('spatial-viewer-theme', currentTheme);
+        // Re-render canvases with new background
+        renderAllSections();
+        if (modalSection) renderModalSection();
+        if (umapVisible) renderUMAP();
+    }}
+
+    function initTheme() {{
+        // Check for saved preference or use initial theme
+        const saved = localStorage.getItem('spatial-viewer-theme');
+        if (saved && (saved === 'light' || saved === 'dark')) {{
+            currentTheme = saved;
+        }}
+        document.documentElement.classList.add(currentTheme);
+        document.getElementById('theme-icon').textContent = currentTheme === 'dark' ? '☀️' : '🌙';
+        document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
+    }}
+
+    function getScreenshotTimestamp() {{
+        return new Date().toISOString().replace(/[:.]/g, '-');
+    }}
+
+    let html2canvasPromise = null;
+    function ensureHtml2CanvasLoaded() {{
+        if (typeof html2canvas === 'function') return Promise.resolve();
+        if (html2canvasPromise) return html2canvasPromise;
+        html2canvasPromise = new Promise((resolve, reject) => {{
+            const script = document.createElement('script');
+            script.src = 'https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js';
+            script.async = true;
+            script.onload = () => resolve();
+            script.onerror = () => reject(new Error('Failed to load html2canvas'));
+            document.head.appendChild(script);
+        }});
+        return html2canvasPromise;
+    }}
+
+    function downloadCanvasImage(canvas, filename) {{
+        if (!canvas) return;
+        const link = document.createElement('a');
+        link.href = canvas.toDataURL('image/png');
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+    }}
+
+    function replaceCanvasesWithImages(root) {{
+        const originals = document.querySelectorAll('canvas');
+        const clones = root.querySelectorAll('canvas');
+        originals.forEach((canvas, idx) => {{
+            const cloneCanvas = clones[idx];
+            if (!cloneCanvas || !cloneCanvas.parentNode) return;
+            const img = document.createElement('img');
+            img.src = canvas.toDataURL('image/png');
+            const rect = canvas.getBoundingClientRect();
+            img.style.width = `${{rect.width}}px`;
+            img.style.height = `${{rect.height}}px`;
+            img.style.display = 'block';
+            img.setAttribute('width', `${{canvas.width}}`);
+            img.setAttribute('height', `${{canvas.height}}`);
+            cloneCanvas.parentNode.replaceChild(img, cloneCanvas);
+        }});
+    }}
+
+    function screenshotFullPage() {{
+        const name = `spatial-viewer-${{getScreenshotTimestamp()}}.png`;
+        ensureHtml2CanvasLoaded()
+            .then(() => html2canvas(document.body, {{
+                backgroundColor: null,
+                scale: getRenderDpr(),
+                useCORS: true
+            }}))
+            .then(canvas => {{
+                downloadCanvasImage(canvas, name);
+            }})
+            .catch(() => {{
+                alert('Screenshot failed (offline? blocked CDN?).');
+            }});
+    }}
+
+    // Color utilities
+    function magma(t) {{
+        const colors = [
+            [0.001, 0.000, 0.015], [0.092, 0.047, 0.256], [0.235, 0.073, 0.386],
+            [0.388, 0.100, 0.451], [0.531, 0.136, 0.430], [0.651, 0.188, 0.392],
+            [0.741, 0.259, 0.331], [0.813, 0.354, 0.255], [0.870, 0.477, 0.171],
+            [0.918, 0.624, 0.110], [0.987, 0.855, 0.185]
+        ];
+        const idx = Math.min(Math.floor(t * 10), 9);
+        const frac = (t * 10) - idx;
+        const c1 = colors[idx], c2 = colors[idx + 1];
+        const r = c1[0] + frac * (c2[0] - c1[0]);
+        const g = c1[1] + frac * (c2[1] - c1[1]);
+        const b = c1[2] + frac * (c2[2] - c1[2]);
+        return `rgb(${{Math.round(r*255)}}, ${{Math.round(g*255)}}, ${{Math.round(b*255)}})`;
+    }}
+
+    function getCategoryColor(idx) {{ return PALETTE[idx % PALETTE.length]; }}
+
+    function formatMetadataLabel(key) {{
+        return METADATA_LABELS[key] || key.replace(/_/g, ' ');
+    }}
+
+    // Get current color config
+    function getColorConfig() {{
+        if (currentGene && DATA.genes_meta[currentGene]) {{
+            const autoScale = geneScaleAuto[currentGene];
+            const overrideScale = geneScaleOverrides[currentGene];
+            const base = DATA.genes_meta[currentGene];
+            const vmin = overrideScale?.vmin ?? autoScale?.vmin ?? base.vmin;
+            const vmax = overrideScale?.vmax ?? autoScale?.vmax ?? base.vmax;
+            return {{
+                is_continuous: true,
+                categories: null,
+                vmin,
+                vmax
+            }};
+        }}
+        return DATA.colors_meta[currentColor] || {{ is_continuous: false, categories: [], vmin: 0, vmax: 1 }};
+    }}
+
+    function getLinkedSpotlightCategory(config = getColorConfig()) {{
+        if (!linkedSpotlightEnabled) return null;
+        if (!config || config.is_continuous) return null;
+        const categories = config.categories || [];
+        const candidate = spotlightHoverCategory || spotlightPinnedCategory;
+        if (!candidate) return null;
+        if (!categories.includes(candidate)) return null;
+        if (hiddenCategories.has(candidate)) return null;
+        return candidate;
+    }}
+
+    function updateLegendSpotlightClasses(targetId = 'legend') {{
+        const legend = document.getElementById(targetId);
+        if (!legend) return;
+        const config = getColorConfig();
+        const activeSpotlight = getLinkedSpotlightCategory(config);
+        legend.querySelectorAll('.legend-item').forEach(item => {{
+            const cat = item.dataset.category;
+            const isSpotlight = !!activeSpotlight && cat === activeSpotlight;
+            const isDimmed = !!activeSpotlight && cat !== activeSpotlight;
+            item.classList.toggle('spotlight', isSpotlight);
+            item.classList.toggle('dimmed', isDimmed);
+        }});
+        const toggleBtn = document.getElementById(`${{targetId}}-spotlight-toggle`);
+        if (toggleBtn) toggleBtn.classList.toggle('active', linkedSpotlightEnabled);
+    }}
+
+    function updateAllLegendSpotlightClasses() {{
+        updateLegendSpotlightClasses('legend');
+        updateLegendSpotlightClasses('modal-legend');
+    }}
+
+    function rerenderForSpotlightChange() {{
+        renderAllSections();
+        if (modalSection) renderModalSection();
+        if (umapVisible) renderUMAP();
+    }}
+
+    function formatNeighborCount(value) {{
+        if (!Number.isFinite(value)) return '0';
+        if (Math.abs(value - Math.round(value)) < 1e-6) return Math.round(value).toLocaleString();
+        return value.toFixed(2);
+    }}
+
+    function computeGenePercentiles(gene, pmin = GENE_SCALE_PMIN, pmax = GENE_SCALE_PMAX) {{
+        const samples = [];
+        let seenNonZero = 0;
+        let totalCells = 0;
+        let totalNonZero = 0;
+        DATA.sections.forEach(section => {{
+            const sparse = section.genes_sparse?.[gene];
+            if (sparse && typeof sparse.vb64 === 'string') {{
+                const sectionCells = section.n_cells ?? section.x?.length ?? 0;
+                const vals = base64ToFloat32Array(sparse.vb64);
+                totalCells += sectionCells;
+                totalNonZero += vals.length;
+                for (let i = 0; i < vals.length; i++) {{
+                    const v = vals[i];
+                    if (v === null || v === undefined || Number.isNaN(v) || v === 0) continue;
+                    seenNonZero += 1;
+                    if (samples.length < GENE_SCALE_MAX_SAMPLES) {{
+                        samples.push(v);
+                    }} else {{
+                        const j = Math.floor(Math.random() * seenNonZero);
+                        if (j < GENE_SCALE_MAX_SAMPLES) samples[j] = v;
+                    }}
+                }}
+                return;
+            }}
+            if (sparse && Array.isArray(sparse.v)) {{
+                const sectionCells = section.n_cells ?? section.x?.length ?? 0;
+                totalCells += sectionCells;
+                totalNonZero += Array.isArray(sparse.i) ? sparse.i.length : sparse.v.length;
+                for (let i = 0; i < sparse.v.length; i++) {{
+                    const v = sparse.v[i];
+                    if (v === null || v === undefined || Number.isNaN(v) || v === 0) continue;
+                    seenNonZero += 1;
+                    if (samples.length < GENE_SCALE_MAX_SAMPLES) {{
+                        samples.push(v);
+                    }} else {{
+                        const j = Math.floor(Math.random() * seenNonZero);
+                        if (j < GENE_SCALE_MAX_SAMPLES) samples[j] = v;
+                    }}
+                }}
+                return;
+            }}
+
+            const vals = section.genes?.[gene];
+            if (!vals) return;
+            totalCells += vals.length;
+            for (let i = 0; i < vals.length; i++) {{
+                const v = vals[i];
+                if (v === null || v === undefined || Number.isNaN(v)) continue;
+                if (v !== 0) {{
+                    totalNonZero += 1;
+                    seenNonZero += 1;
+                    if (samples.length < GENE_SCALE_MAX_SAMPLES) {{
+                        samples.push(v);
+                    }} else {{
+                        const j = Math.floor(Math.random() * seenNonZero);
+                        if (j < GENE_SCALE_MAX_SAMPLES) samples[j] = v;
+                    }}
+                }}
+            }}
+        }});
+        if (totalCells === 0) return null;
+        if (totalNonZero === 0) return {{ vmin: 0, vmax: 0, pmin, pmax }};
+        if (samples.length === 0) return null;
+        samples.sort((a, b) => a - b);
+        const nonZeroFrac = Math.max(0, Math.min(1, totalNonZero / totalCells));
+        const zeroFrac = 1 - nonZeroFrac;
+        const denom = Math.max(1e-12, 1 - zeroFrac);
+        const qLo = Math.max(0, Math.min(1, pmin / 100));
+        const qHi = Math.max(0, Math.min(1, pmax / 100));
+        const nonZeroQuantile = (q) => {{
+            const idx = Math.max(0, Math.floor(q * (samples.length - 1)));
+            return samples[idx];
+        }};
+        let vmin = qLo <= zeroFrac ? 0 : nonZeroQuantile((qLo - zeroFrac) / denom);
+        let vmax = qHi <= zeroFrac ? 0 : nonZeroQuantile((qHi - zeroFrac) / denom);
+        if (!Number.isFinite(vmin) || !Number.isFinite(vmax)) return null;
+        if (vmin === vmax) {{
+            const minAll = samples[0];
+            const maxAll = samples[samples.length - 1];
+            if (minAll !== maxAll) {{
+                vmin = minAll;
+                vmax = maxAll;
+            }}
+        }}
+        return {{ vmin, vmax, pmin, pmax }};
+    }}
+
+    const geneDenseCache = new Map(); // key: sectionId::gene -> Float32Array
+
+    function base64ToBytes(b64) {{
+        const bin = atob(b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        return bytes;
+    }}
+
+    function base64ToFloat32Array(b64) {{
+        const bytes = base64ToBytes(b64);
+        return new Float32Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 4));
+    }}
+
+    function base64ToUint32Array(b64) {{
+        const bytes = base64ToBytes(b64);
+        return new Uint32Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 4));
+    }}
+
+    function hydratePackedSections() {{
+        // Keep initial load fast: don't eagerly base64-decode large arrays here.
+        // Decode on-demand when a section is rendered (grid/modal/UMAP).
+        if (!DATA || !Array.isArray(DATA.sections)) return;
+        DATA.sections.forEach(section => {{
+            if (!section.colors) section.colors = {{}};
+            if (!section.colors_b64) section.colors_b64 = {{}};
+            if (!section._colorCache) section._colorCache = {{}};
+            if (!section._edgesCache) section._edgesCache = null;
+        }});
+    }}
+
+    function ensureSectionXY(section) {{
+        if (!section) return false;
+        if ((section.x === null || section.x === undefined) && typeof section.xb64 === 'string') {{
+            section.x = base64ToFloat32Array(section.xb64);
+            delete section.xb64;
+        }}
+        if ((section.y === null || section.y === undefined) && typeof section.yb64 === 'string') {{
+            section.y = base64ToFloat32Array(section.yb64);
+            delete section.yb64;
+        }}
+        if (section.x === null || section.x === undefined) section.x = [];
+        if (section.y === null || section.y === undefined) section.y = [];
+        return true;
+    }}
+
+    function ensureSectionUMAP(section) {{
+        if (!section) return false;
+        if ((section.umap_x === null || section.umap_x === undefined) && typeof section.umap_xb64 === 'string') {{
+            section.umap_x = base64ToFloat32Array(section.umap_xb64);
+            delete section.umap_xb64;
+        }}
+        if ((section.umap_y === null || section.umap_y === undefined) && typeof section.umap_yb64 === 'string') {{
+            section.umap_y = base64ToFloat32Array(section.umap_yb64);
+            delete section.umap_yb64;
+        }}
+        return true;
+    }}
+
+    function getSectionEdgesPacked(section) {{
+        if (Array.isArray(section.edges)) return section.edges;
+        if (section._edgesCache) return section._edgesCache;
+        if (typeof section.edges_b64 !== 'string') return null;
+        const pairs = base64ToUint32Array(section.edges_b64);
+        section._edgesCache = pairs;
+        return pairs;
+    }}
+
+    function getSectionColorValues(section, color) {{
+        const dense = section.colors?.[color];
+        if (dense) return dense;
+        const b64 = section.colors_b64?.[color];
+        if (typeof b64 !== 'string') return null;
+        section._colorCache = section._colorCache || {{}};
+        if (section._colorCache[color]) return section._colorCache[color];
+        const decoded = base64ToFloat32Array(b64);
+        section._colorCache[color] = decoded;
+        return decoded;
+    }}
+
+    function getSectionGeneValues(section, gene) {{
+        const dense = section.genes?.[gene];
+        if (dense) return dense;
+
+        const sparse = section.genes_sparse?.[gene];
+        if (!sparse) return null;
+
+        const key = `${{section.id}}::${{gene}}`;
+        const cached = geneDenseCache.get(key);
+        if (cached) return cached;
+
+        const n = section.n_cells ?? section.x?.length ?? 0;
+        const arr = new Float32Array(n);
+        if (typeof sparse.ib64 === 'string' && typeof sparse.vb64 === 'string') {{
+            const idxs = base64ToUint32Array(sparse.ib64);
+            const vals = base64ToFloat32Array(sparse.vb64);
+            const m = Math.min(idxs.length, vals.length);
+            for (let k = 0; k < m; k++) {{
+                const idx = idxs[k];
+                if (idx < n) arr[idx] = vals[k];
+            }}
+        }} else if (Array.isArray(sparse.i) && Array.isArray(sparse.v)) {{
+            const m = Math.min(sparse.i.length, sparse.v.length);
+            for (let k = 0; k < m; k++) {{
+                const idx = sparse.i[k];
+                if (idx >= 0 && idx < n) arr[idx] = sparse.v[k];
+            }}
+        }} else {{
+            return null;
+        }}
+        if (Array.isArray(sparse.nan)) {{
+            for (let k = 0; k < sparse.nan.length; k++) {{
+                const idx = sparse.nan[k];
+                if (idx >= 0 && idx < n) arr[idx] = NaN;
+            }}
+        }}
+        geneDenseCache.set(key, arr);
+        return arr;
+    }}
+
+    function ensureGeneAutoScale(gene) {{
+        if (!gene) return;
+        if (!geneScaleAuto[gene]) {{
+            const autoScale = computeGenePercentiles(gene);
+            if (autoScale) geneScaleAuto[gene] = autoScale;
+        }}
+    }}
+
+    function updateExpressionScaleUI() {{
+        const section = document.getElementById('expression-scale-section');
+        const vminInput = document.getElementById('expr-vmin');
+        const vmaxInput = document.getElementById('expr-vmax');
+        const hint = document.getElementById('expr-scale-hint');
+        if (!section || !vminInput || !vmaxInput || !hint) return;
+        if (!currentGene) {{
+            section.style.display = 'none';
+            return;
+        }}
+        section.style.display = 'block';
+        const config = getColorConfig();
+        vminInput.value = Number.isFinite(config.vmin) ? config.vmin.toFixed(3) : '';
+        vmaxInput.value = Number.isFinite(config.vmax) ? config.vmax.toFixed(3) : '';
+        if (geneScaleOverrides[currentGene]) {{
+            hint.textContent = 'Custom scale (manual).';
+        }} else if (geneScaleAuto[currentGene]) {{
+            hint.textContent = `Auto scale: ${{GENE_SCALE_PMIN}}-${{GENE_SCALE_PMAX}} percentile.`;
+        }} else {{
+            hint.textContent = 'Auto scale unavailable; using data range.';
+        }}
+    }}
+
+    function parseGeneList(text) {{
+        if (!text) return [];
+        const parts = String(text)
+            .split(/[,\s]+/)
+            .map(s => s.trim())
+            .filter(Boolean);
+        const seen = new Set();
+        const genes = [];
+        parts.forEach(g => {{
+            if (seen.has(g)) return;
+            if (DATA.genes_meta && DATA.genes_meta[g]) {{
+                seen.add(g);
+                genes.push(g);
+            }}
+        }});
+        return genes;
+    }}
+
+    function getCategoricalColorColumns() {{
+        const cols = (DATA.available_colors || []).filter(col => {{
+            const meta = DATA.colors_meta?.[col];
+            return meta && !meta.is_continuous && Array.isArray(meta.categories);
+        }});
+        cols.sort((a, b) => a.localeCompare(b));
+        return cols;
+    }}
+
+    function updateDotplotAggregateValueOptions() {{
+        const aggSelect = document.getElementById('dotplot-aggregate-by');
+        const valueWrap = document.getElementById('dotplot-aggregate-value-wrap');
+        const valueSelect = document.getElementById('dotplot-aggregate-value');
+        if (!aggSelect || !valueWrap || !valueSelect) return;
+        const key = aggSelect.value;
+        if (!key) {{
+            valueWrap.style.display = 'none';
+            valueSelect.innerHTML = '';
+            return;
+        }}
+        const values = (DATA.metadata_filters && DATA.metadata_filters[key]) ? DATA.metadata_filters[key] : [];
+        valueWrap.style.display = 'block';
+        const opts = ['<option value="__ALL__">All</option>']
+            .concat(values.map(v => `<option value="${{v}}">${{v}}</option>`));
+        valueSelect.innerHTML = opts.join('');
+    }}
+
+    function renderDotplot() {{
+        const status = document.getElementById('dotplot-status');
+        const grid = document.getElementById('dotplot-grid');
+        const groupbySelect = document.getElementById('dotplot-groupby');
+        const genesInput = document.getElementById('dotplot-genes');
+        const aggSelect = document.getElementById('dotplot-aggregate-by');
+        const aggValueSelect = document.getElementById('dotplot-aggregate-value');
+        if (!status || !grid || !groupbySelect || !genesInput || !aggSelect) return;
+
+        const groupbyColor = groupbySelect.value;
+        if (!groupbyColor) {{
+            status.textContent = 'Pick a categorical color to group by.';
+            grid.innerHTML = '';
+            return;
+        }}
+        const meta = DATA.colors_meta?.[groupbyColor];
+        if (!meta || meta.is_continuous || !Array.isArray(meta.categories)) {{
+            status.textContent = 'Dotplot requires a categorical color column.';
+            grid.innerHTML = '';
+            return;
+        }}
+
+        const genes = parseGeneList(genesInput.value);
+        if (genes.length === 0) {{
+            status.textContent = 'Enter one or more genes (comma-separated).';
+            grid.innerHTML = '';
+            return;
+        }}
+
+        const aggKey = aggSelect.value || '';
+        const aggValue = (aggKey && aggValueSelect) ? (aggValueSelect.value || '__ALL__') : '__ALL__';
+        const aggLabel = aggKey ? `${{formatMetadataLabel(aggKey)}}=${{aggValue}}` : 'All sections';
+
+        dotplotRenderToken += 1;
+        const token = dotplotRenderToken;
+        status.textContent = `Computing dotplot (${{groupbyColor}}, genes=${{genes.length}}, ${{aggLabel}})…`;
+        grid.innerHTML = '';
+
+        setTimeout(() => {{
+            if (token !== dotplotRenderToken) return;
+
+            const categories = meta.categories;
+            const k = categories.length;
+
+            // Eligible sections + pre-count totals per category once.
+            const eligible = [];
+            const totals = new Uint32Array(k);
+            for (let s = 0; s < DATA.sections.length; s++) {{
+                if (token !== dotplotRenderToken) return;
+                const section = DATA.sections[s];
+                if (!sectionPassesFilter(section)) continue;
+                if (aggKey) {{
+                    const val = section.metadata?.[aggKey] || 'unknown';
+                    if (aggValue !== '__ALL__' && val !== aggValue) continue;
+                }}
+                const groupVals = getSectionColorValues(section, groupbyColor);
+                if (!groupVals || !groupVals.length) continue;
+                eligible.push({{ section, groupVals }});
+                for (let i = 0; i < groupVals.length; i++) {{
+                    const gv = groupVals[i];
+                    if (gv === null || gv === undefined || Number.isNaN(gv)) continue;
+                    const ci = Math.round(gv);
+                    if (ci >= 0 && ci < k) totals[ci] += 1;
+                }}
+            }}
+
+            if (eligible.length === 0) {{
+                status.textContent = 'No sections match the current filters.';
+                return;
+            }}
+
+            const sums = genes.map(() => new Float64Array(k));
+            const nnz = genes.map(() => new Uint32Array(k));
+            let usedDenseFallback = false;
+
+            for (let g = 0; g < genes.length; g++) {{
+                if (token !== dotplotRenderToken) return;
+                const gene = genes[g];
+                for (let e = 0; e < eligible.length; e++) {{
+                    const {{ section, groupVals }} = eligible[e];
+                    const sparse = section.genes_sparse?.[gene];
+                    if (sparse) {{
+                        if (typeof sparse.ib64 === 'string' && typeof sparse.vb64 === 'string') {{
+                            const idxs = base64ToUint32Array(sparse.ib64);
+                            const vals = base64ToFloat32Array(sparse.vb64);
+                            const m = Math.min(idxs.length, vals.length);
+                            for (let j = 0; j < m; j++) {{
+                                const idx = idxs[j];
+                                if (idx >= groupVals.length) continue;
+                                const gv = groupVals[idx];
+                                if (!Number.isFinite(gv)) continue;
+                                const ci = Math.round(gv);
+                                if (ci < 0 || ci >= k) continue;
+                                const v = vals[j];
+                                if (!Number.isFinite(v) || v === 0) continue;
+                                sums[g][ci] += v;
+                                nnz[g][ci] += 1;
+                            }}
+                            continue;
+                        }}
+                        if (Array.isArray(sparse.i) && Array.isArray(sparse.v)) {{
+                            const m = Math.min(sparse.i.length, sparse.v.length);
+                            for (let j = 0; j < m; j++) {{
+                                const idx = sparse.i[j];
+                                if (idx === null || idx === undefined) continue;
+                                if (idx < 0 || idx >= groupVals.length) continue;
+                                const gv = groupVals[idx];
+                                if (!Number.isFinite(gv)) continue;
+                                const ci = Math.round(gv);
+                                if (ci < 0 || ci >= k) continue;
+                                const v = sparse.v[j];
+                                if (!Number.isFinite(v) || v === 0) continue;
+                                sums[g][ci] += v;
+                                nnz[g][ci] += 1;
+                            }}
+                            continue;
+                        }}
+                    }}
+
+                    const dense = section.genes?.[gene];
+                    if (dense && dense.length) {{
+                        usedDenseFallback = true;
+                        const n = Math.min(dense.length, groupVals.length);
+                        for (let i = 0; i < n; i++) {{
+                            const v = dense[i];
+                            if (!Number.isFinite(v) || v === 0) continue;
+                            const gv = groupVals[i];
+                            if (!Number.isFinite(gv)) continue;
+                            const ci = Math.round(gv);
+                            if (ci < 0 || ci >= k) continue;
+                            sums[g][ci] += v;
+                            nnz[g][ci] += 1;
+                        }}
+                    }}
+                }}
+            }}
+
+            if (token !== dotplotRenderToken) return;
+            grid.style.setProperty('--dotplot-cols', String(genes.length));
+            const header = `
+                <div class="dotplot-row dotplot-header">
+                    <div class="dotplot-label">Cell type</div>
+                    ${{genes.map(g => `<div class="dotplot-gene" title="${{g}}">${{g}}</div>`).join('')}}
+                </div>
+            `;
+
+            const rows = categories.map((cat, ci) => {{
+                const total = totals[ci];
+                const cells = genes.map((gene, gi) => {{
+                    if (!total) return `<div class="dotplot-dot" title="No cells"></div>`;
+                    const mean = sums[gi][ci] / total;
+                    const frac = nnz[gi][ci] / total;
+                    const vmax = (DATA.genes_meta?.[gene]?.vmax ?? 0) || 0;
+                    const tRaw = vmax > 0 ? (mean / vmax) : 0;
+                    const t = Math.max(0, Math.min(1, tRaw));
+                    const color = magma(0.1 + 0.9 * t);
+                    const r = Math.max(0.5, Math.min(8, 8 * Math.sqrt(frac)));
+                    const title = `${{gene}} · mean=${{mean.toFixed(3)}} · %expr=${{(frac*100).toFixed(1)}} · n=${{total.toLocaleString()}}`;
+                    return `
+                        <div class="dotplot-dot" title="${{title}}">
+                            <svg width="20" height="20" viewBox="0 0 20 20">
+                                <circle cx="10" cy="10" r="${{r}}" fill="${{color}}" stroke="rgba(0,0,0,0.10)" stroke-width="1"></circle>
+                            </svg>
+                        </div>
+                    `;
+                }}).join('');
+                return `
+                    <div class="dotplot-row">
+                        <div class="dotplot-label" title="${{cat}}">${{cat}}</div>
+                        ${{cells}}
+                    </div>
+                `;
+            }}).join('');
+
+            grid.innerHTML = header + rows;
+            const denseNote = usedDenseFallback ? ' (some genes were dense; may be slower)' : '';
+            status.textContent = `Dotplot ready (${{eligible.length}} sections, ${{aggLabel}})${{denseNote}}.`;
+        }}, 0);
+    }}
+
+    // Get values for a section
+    function getSectionValues(section) {{
+        if (currentGene) {{
+            const geneVals = getSectionGeneValues(section, currentGene);
+            if (geneVals) return geneVals;
+        }}
+        const colVals = getSectionColorValues(section, currentColor);
+        return colVals || [];
+    }}
+
+    // Check if section passes filters
+    function sectionPassesFilter(section) {{
+        for (const [key, values] of Object.entries(activeFilters)) {{
+            if (values.size === 0) continue;
+            const sectionVal = section.metadata[key];
+            if (!sectionVal || !values.has(sectionVal)) return false;
+        }}
+        return true;
+    }}
+
+    // Get current panel background color from CSS variable
+    function getPanelBg() {{
+        return getComputedStyle(document.documentElement).getPropertyValue('--panel-bg').trim();
+    }}
+
+    function getGraphColor() {{
+        const color = getComputedStyle(document.documentElement).getPropertyValue('--graph-color').trim();
+        return color || 'rgba(0, 0, 0, 0.12)';
+    }}
+
+    function getSectionAdjacency(section) {{
+        if (section._adj) return section._adj;
+        ensureSectionXY(section);
+        const n = section.x.length;
+        const adj = Array.from({{ length: n }}, () => []);
+        const edges = getSectionEdgesPacked(section);
+        if (Array.isArray(edges)) {{
+            edges.forEach(edge => {{
+                const i = edge[0];
+                const j = edge[1];
+                if (i >= 0 && j >= 0 && i < n && j < n) {{
+                    adj[i].push(j);
+                    adj[j].push(i);
+                }}
+            }});
+        }} else if (edges instanceof Uint32Array) {{
+            for (let e = 0; e + 1 < edges.length; e += 2) {{
+                const i = edges[e];
+                const j = edges[e + 1];
+                if (i < n && j < n) {{
+                    adj[i].push(j);
+                    adj[j].push(i);
+                }}
+            }}
+        }}
+        section._adj = adj;
+        return adj;
+    }}
+
+    function computeNeighborRings(section, startIdx, maxHops) {{
+        const edges = getSectionEdgesPacked(section);
+        if (!edges || edges.length === 0) return [];
+        const adj = getSectionAdjacency(section);
+        const visited = new Set([startIdx]);
+        let frontier = [startIdx];
+        const rings = [];
+
+        for (let hop = 1; hop <= maxHops; hop++) {{
+            const nextSet = new Set();
+            frontier.forEach(node => {{
+                adj[node].forEach(nb => {{
+                    if (!visited.has(nb)) {{
+                        visited.add(nb);
+                        nextSet.add(nb);
+                    }}
+                }});
+            }});
+            if (nextSet.size === 0) break;
+            const ring = Array.from(nextSet);
+            rings.push(ring);
+            frontier = ring;
+        }}
+
+        return rings;
+    }}
+
+    function updateHoverNeighbors(section, cellIdx) {{
+        if (!neighborHoverEnabled) return false;
+        const edges = section ? getSectionEdgesPacked(section) : null;
+        if (!section || !edges || edges.length === 0) {{
+            hoverNeighbors = null;
+            return false;
+        }}
+        if (hoverNeighbors &&
+            hoverNeighbors.sectionId === section.id &&
+            hoverNeighbors.centerIdx === cellIdx) {{
+            return false;
+        }}
+        const rings = computeNeighborRings(section, cellIdx, MAX_HOVER_HOPS);
+        hoverNeighbors = {{
+            sectionId: section.id,
+            centerIdx: cellIdx,
+            rings,
+        }};
+        return true;
+    }}
+
+    function drawNeighborHighlights(ctx, section, transform, adjustedSpotSize) {{
+        if (!hoverNeighbors || hoverNeighbors.sectionId !== section.id) return;
+        let rings = hoverNeighbors.rings || [];
+        const centerIdx = hoverNeighbors.centerIdx;
+        if (centerIdx === null || centerIdx === undefined) return;
+
+        const config = getColorConfig();
+        const values = getSectionValues(section);
+
+        if (neighborHopMode !== 'all') {{
+            const hopIdx = Math.max(1, Math.min(MAX_HOVER_HOPS, parseInt(neighborHopMode, 10))) - 1;
+            rings = rings[hopIdx] ? [rings[hopIdx]] : [];
+        }}
+
+        const xCenter = transform.centerX + (section.x[centerIdx] - transform.dataCenterX) * transform.scale;
+        const yCenter = transform.centerY - (section.y[centerIdx] - transform.dataCenterY) * transform.scale;
+
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+        ctx.lineWidth = Math.max(1.5, adjustedSpotSize * 0.35);
+        ctx.beginPath();
+        ctx.arc(xCenter, yCenter, adjustedSpotSize + 2, 0, Math.PI * 2);
+        ctx.stroke();
+
+        rings.forEach((ring, idx) => {{
+            const color = HOVER_COLORS[idx] || HOVER_COLORS[HOVER_COLORS.length - 1];
+            ctx.strokeStyle = color;
+            ctx.lineWidth = Math.max(1, adjustedSpotSize * 0.25);
+            ring.forEach(cellIdx => {{
+                const val = values[cellIdx];
+                if (val === null || val === undefined) return;
+                if (!config.is_continuous) {{
+                    const catIdx = Math.round(val);
+                    const catName = config.categories[catIdx];
+                    if (hiddenCategories.has(catName)) return;
+                }}
+                const x = transform.centerX + (section.x[cellIdx] - transform.dataCenterX) * transform.scale;
+                const y = transform.centerY - (section.y[cellIdx] - transform.dataCenterY) * transform.scale;
+                if (x < -adjustedSpotSize || x > transform.width + adjustedSpotSize ||
+                    y < -adjustedSpotSize || y > transform.height + adjustedSpotSize) return;
+                ctx.beginPath();
+                ctx.arc(x, y, adjustedSpotSize + 1 + idx, 0, Math.PI * 2);
+                ctx.stroke();
+            }});
+        }});
+
+        rings.forEach((ring, idx) => {{
+            const color = HOVER_COLORS[idx] || HOVER_COLORS[HOVER_COLORS.length - 1];
+            ctx.strokeStyle = color;
+            ctx.lineWidth = Math.max(1, adjustedSpotSize * 0.2);
+            ctx.globalAlpha = 0.8;
+            ctx.beginPath();
+            ring.forEach(cellIdx => {{
+                const val = values[cellIdx];
+                if (val === null || val === undefined) return;
+                if (!config.is_continuous) {{
+                    const catIdx = Math.round(val);
+                    const catName = config.categories[catIdx];
+                    if (hiddenCategories.has(catName)) return;
+                }}
+                const x = transform.centerX + (section.x[cellIdx] - transform.dataCenterX) * transform.scale;
+                const y = transform.centerY - (section.y[cellIdx] - transform.dataCenterY) * transform.scale;
+                if (x < -adjustedSpotSize || x > transform.width + adjustedSpotSize ||
+                    y < -adjustedSpotSize || y > transform.height + adjustedSpotSize) return;
+                ctx.moveTo(xCenter, yCenter);
+                ctx.lineTo(x, y);
+            }});
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+        }});
+        ctx.restore();
+    }}
+
+    // Check if a cell is selected
+    function isCellSelected(sectionId, cellIdx) {{
+        return selectedCells.has(`${{sectionId}}:${{cellIdx}}`);
+    }}
+
+    // Point-in-polygon test using ray casting algorithm
+    function pointInPolygon(x, y, polygon) {{
+        if (polygon.length < 3) return false;
+        let inside = false;
+        for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {{
+            const xi = polygon[i].x, yi = polygon[i].y;
+            const xj = polygon[j].x, yj = polygon[j].y;
+            if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {{
+                inside = !inside;
+            }}
+        }}
+        return inside;
+    }}
+
+    // UMAP rendering
+    function renderUMAP() {{
+        if (!DATA.has_umap || !umapVisible) return;
+
+        const canvas = document.getElementById('umap-canvas');
+        const ctx = canvas.getContext('2d');
+        const dpr = getRenderDpr();
+        const container = document.getElementById('umap-canvas-container');
+        const rect = container.getBoundingClientRect();
+        canvas.width = rect.width * dpr;
+        canvas.height = rect.height * dpr;
+        ctx.scale(dpr, dpr);
+
+        const width = rect.width, height = rect.height;
+        ctx.fillStyle = getPanelBg();
+        ctx.fillRect(0, 0, width, height);
+
+        const bounds = DATA.umap_bounds;
+        if (!bounds) return;
+
+        const dataWidth = bounds.xmax - bounds.xmin;
+        const dataHeight = bounds.ymax - bounds.ymin;
+        const padding = 20;
+        const baseScale = Math.min((width - 2*padding) / dataWidth, (height - 2*padding) / dataHeight);
+        const scale = baseScale * umapZoom;
+
+        const centerX = width / 2 + umapPanX;
+        const centerY = height / 2 + umapPanY;
+        const dataCenterX = (bounds.xmin + bounds.xmax) / 2;
+        const dataCenterY = (bounds.ymin + bounds.ymax) / 2;
+
+        const config = getColorConfig();
+        const adjustedSpotSize = Math.max(1, umapSpotSize * umapZoom * 0.5);
+        const activeSpotlight = getLinkedSpotlightCategory(config);
+        const hasSpotlight = !!activeSpotlight;
+
+        // Check if any categories are hidden
+        const hasHidden = hiddenCategories.size > 0 && !config.is_continuous;
+
+        // First pass: draw hidden categories as grey (if any are hidden)
+        if (hasHidden) {{
+            ctx.fillStyle = '#888888';
+            ctx.globalAlpha = 0.2;
+            DATA.sections.forEach(section => {{
+                ensureSectionUMAP(section);
+                if (!section.umap_x || !section.umap_y) return;
+                const values = getSectionValues(section);
+
+                for (let i = 0; i < section.umap_x.length; i++) {{
+                    const val = values[i];
+                    if (val === null || val === undefined) continue;
+
+                    const catIdx = Math.round(val);
+                    const catName = config.categories[catIdx];
+                    if (!hiddenCategories.has(catName)) continue; // Only draw hidden cells in first pass
+
+                    const x = centerX + (section.umap_x[i] - dataCenterX) * scale;
+                    const y = centerY - (section.umap_y[i] - dataCenterY) * scale;
+
+                    if (x < -adjustedSpotSize || x > width + adjustedSpotSize ||
+                        y < -adjustedSpotSize || y > height + adjustedSpotSize) continue;
+
+                    ctx.beginPath();
+                    ctx.arc(x, y, adjustedSpotSize, 0, Math.PI * 2);
+                    ctx.fill();
+                }}
+            }});
+            ctx.globalAlpha = 1;
+        }}
+
+        // Second pass: draw visible categories with full color
+        DATA.sections.forEach(section => {{
+            ensureSectionUMAP(section);
+            if (!section.umap_x || !section.umap_y) return;
+
+            const values = getSectionValues(section);
+
+            for (let i = 0; i < section.umap_x.length; i++) {{
+                const val = values[i];
+                if (val === null || val === undefined) continue;
+
+                // Skip hidden categories (they were drawn in first pass)
+                if (!config.is_continuous) {{
+                    const catIdx = Math.round(val);
+                    const catName = config.categories[catIdx];
+                    if (hiddenCategories.has(catName)) continue;
+                }}
+
+                const x = centerX + (section.umap_x[i] - dataCenterX) * scale;
+                const y = centerY - (section.umap_y[i] - dataCenterY) * scale;
+
+                // Skip if outside canvas
+                if (x < -adjustedSpotSize || x > width + adjustedSpotSize ||
+                    y < -adjustedSpotSize || y > height + adjustedSpotSize) continue;
+
+                let color;
+                let isSpotlightCategory = false;
+                if (config.is_continuous) {{
+                    const t = (val - config.vmin) / (config.vmax - config.vmin);
+                    color = magma(Math.max(0, Math.min(1, t)));
+                }} else {{
+                    const catIdx = Math.round(val);
+                    const catName = config.categories[catIdx];
+                    isSpotlightCategory = hasSpotlight && catName === activeSpotlight;
+                    color = getCategoryColor(catIdx);
+                }}
+
+                if (hasSpotlight && !isSpotlightCategory) {{
+                    ctx.fillStyle = '#bbbbbb';
+                    ctx.globalAlpha = 0.12;
+                }} else {{
+                    ctx.fillStyle = color;
+                    ctx.globalAlpha = 1;
+                }}
+                ctx.beginPath();
+                ctx.arc(x, y, adjustedSpotSize, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Draw selection highlight
+                if (isCellSelected(section.id, i)) {{
+                    ctx.strokeStyle = '#ffd700';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }}
+            }}
+        }});
+        ctx.globalAlpha = 1;
+
+        // Draw lasso path if currently drawing
+        if (isDrawingLasso && lassoPath.length > 1) {{
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            ctx.moveTo(lassoPath[0].x, lassoPath[0].y);
+            for (let i = 1; i < lassoPath.length; i++) {{
+                ctx.lineTo(lassoPath[i].x, lassoPath[i].y);
+            }}
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }}
+    }}
+
+    // Perform lasso selection on UMAP
+    function performLassoSelection() {{
+        if (lassoPath.length < 3) return;
+
+        const canvas = document.getElementById('umap-canvas');
+        const container = document.getElementById('umap-canvas-container');
+        const rect = container.getBoundingClientRect();
+        const width = rect.width, height = rect.height;
+
+        const bounds = DATA.umap_bounds;
+        if (!bounds) return;
+
+        const dataWidth = bounds.xmax - bounds.xmin;
+        const dataHeight = bounds.ymax - bounds.ymin;
+        const padding = 20;
+        const baseScale = Math.min((width - 2*padding) / dataWidth, (height - 2*padding) / dataHeight);
+        const scale = baseScale * umapZoom;
+
+        const centerX = width / 2 + umapPanX;
+        const centerY = height / 2 + umapPanY;
+        const dataCenterX = (bounds.xmin + bounds.xmax) / 2;
+        const dataCenterY = (bounds.ymin + bounds.ymax) / 2;
+
+        const config = getColorConfig();
+
+        // Clear previous selection or add to it (could add shift-key support later)
+        selectedCells.clear();
+
+        // Check all cells in all sections
+        DATA.sections.forEach(section => {{
+            ensureSectionUMAP(section);
+            if (!section.umap_x || !section.umap_y) return;
+
+            const values = getSectionValues(section);
+
+            for (let i = 0; i < section.umap_x.length; i++) {{
+                const val = values[i];
+                if (val === null || val === undefined) continue;
+
+                // Skip hidden categories
+                if (!config.is_continuous) {{
+                    const catIdx = Math.round(val);
+                    const catName = config.categories[catIdx];
+                    if (hiddenCategories.has(catName)) continue;
+                }}
+
+                const x = centerX + (section.umap_x[i] - dataCenterX) * scale;
+                const y = centerY - (section.umap_y[i] - dataCenterY) * scale;
+
+                if (pointInPolygon(x, y, lassoPath)) {{
+                    selectedCells.add(`${{section.id}}:${{i}}`);
+                }}
+            }}
+        }});
+
+        updateSelectionInfo();
+        renderUMAP();
+        renderAllSections();
+        if (modalSection) renderModalSection();
+    }}
+
+    // Update selection info display
+    function updateSelectionInfo() {{
+        const info = document.getElementById('umap-selection-info');
+        if (selectedCells.size === 0) {{
+            info.textContent = 'No cells selected';
+        }} else {{
+            info.textContent = `${{selectedCells.size.toLocaleString()}} cells selected`;
+        }}
+    }}
+
+    // Clear selection
+    function clearSelection() {{
+        selectedCells.clear();
+        updateSelectionInfo();
+        renderUMAP();
+        renderAllSections();
+        if (modalSection) renderModalSection();
+    }}
+
+    function clampUMAPPanelSize(size) {{
+        const viewportLimit = Math.floor(Math.min(window.innerWidth, window.innerHeight) * 0.8);
+        const maxSize = Math.max(UMAP_PANEL_MIN_SIZE, Math.min(UMAP_PANEL_MAX_SIZE, viewportLimit));
+        if (!Number.isFinite(size)) return Math.min(320, maxSize);
+        return Math.max(UMAP_PANEL_MIN_SIZE, Math.min(maxSize, Math.round(size)));
+    }}
+
+    function getUMAPDockLabel(dock) {{
+        if (dock === 'top-right') return 'TR';
+        if (dock === 'top-left') return 'TL';
+        if (dock === 'bottom-right') return 'BR';
+        if (dock === 'bottom-left') return 'BL';
+        return 'TR';
+    }}
+
+    function loadUMAPPanelState() {{
+        try {{
+            const saved = localStorage.getItem(UMAP_PANEL_STORAGE_KEY);
+            if (!saved) return;
+            const parsed = JSON.parse(saved);
+            if (parsed && typeof parsed === 'object') {{
+                if (UMAP_PANEL_DOCKS.includes(parsed.dock)) umapPanelDock = parsed.dock;
+                if (Number.isFinite(parsed.size)) umapPanelSize = clampUMAPPanelSize(parsed.size);
+            }}
+        }} catch (err) {{
+            // Ignore malformed localStorage values.
+        }}
+    }}
+
+    function saveUMAPPanelState() {{
+        try {{
+            localStorage.setItem(
+                UMAP_PANEL_STORAGE_KEY,
+                JSON.stringify({{ dock: umapPanelDock, size: umapPanelSize }})
+            );
+        }} catch (err) {{
+            // Ignore storage failures (private mode, quota, etc.).
+        }}
+    }}
+
+    function applyUMAPPanelState() {{
+        const panel = document.getElementById('umap-panel');
+        if (!panel) return;
+        umapPanelSize = clampUMAPPanelSize(umapPanelSize);
+        panel.classList.remove('dock-top-right', 'dock-top-left', 'dock-bottom-right', 'dock-bottom-left');
+        panel.classList.add(`dock-${{umapPanelDock}}`);
+        panel.style.width = `${{umapPanelSize}}px`;
+        const dockBtn = document.getElementById('umap-dock-btn');
+        if (dockBtn) dockBtn.textContent = getUMAPDockLabel(umapPanelDock);
+        saveUMAPPanelState();
+    }}
+
+    function adjustUMAPPanelSize(delta) {{
+        umapPanelSize = clampUMAPPanelSize(umapPanelSize + delta);
+        applyUMAPPanelState();
+        if (umapVisible) renderUMAP();
+    }}
+
+    // Toggle UMAP panel
+    function toggleUMAP() {{
+        umapVisible = !umapVisible;
+        const panel = document.getElementById('umap-panel');
+        const btn = document.getElementById('umap-toggle');
+        panel.classList.toggle('visible', umapVisible);
+        btn.classList.toggle('active', umapVisible);
+        // Re-render after layout change to fix grid sizing
+        requestAnimationFrame(() => {{
+            renderAllSections();
+            if (umapVisible) renderUMAP();
+        }});
+    }}
+
+    // Initialize UMAP panel
+    function initUMAP() {{
+        if (!DATA.has_umap) return;
+
+        // Show UMAP toggle button
+        document.getElementById('umap-toggle').style.display = 'inline-block';
+        document.getElementById('umap-toggle').addEventListener('click', toggleUMAP);
+        loadUMAPPanelState();
+        applyUMAPPanelState();
+
+        const dockBtn = document.getElementById('umap-dock-btn');
+        if (dockBtn) {{
+            dockBtn.addEventListener('click', () => {{
+                const idx = UMAP_PANEL_DOCKS.indexOf(umapPanelDock);
+                umapPanelDock = UMAP_PANEL_DOCKS[(idx + 1 + UMAP_PANEL_DOCKS.length) % UMAP_PANEL_DOCKS.length];
+                applyUMAPPanelState();
+                if (umapVisible) renderUMAP();
+            }});
+        }}
+        document.getElementById('umap-panel-smaller')?.addEventListener('click', () => {{
+            adjustUMAPPanelSize(-UMAP_PANEL_SIZE_STEP);
+        }});
+        document.getElementById('umap-panel-larger')?.addEventListener('click', () => {{
+            adjustUMAPPanelSize(UMAP_PANEL_SIZE_STEP);
+        }});
+
+        // Magic wand button
+        document.getElementById('magic-wand-btn').addEventListener('click', () => {{
+            magicWandActive = !magicWandActive;
+            const btn = document.getElementById('magic-wand-btn');
+            btn.classList.toggle('active', magicWandActive);
+            const canvas = document.getElementById('umap-canvas');
+            canvas.style.cursor = magicWandActive ? 'crosshair' : 'grab';
+        }});
+
+        // Clear selection button
+        document.getElementById('clear-selection-btn').addEventListener('click', clearSelection);
+
+        // UMAP spot size slider
+        document.getElementById('umap-spot-size').addEventListener('input', (e) => {{
+            umapSpotSize = parseFloat(e.target.value);
+            document.getElementById('umap-spot-size-label').textContent = umapSpotSize;
+            renderUMAP();
+        }});
+
+        // UMAP canvas events
+        const canvas = document.getElementById('umap-canvas');
+        const container = document.getElementById('umap-canvas-container');
+
+        canvas.addEventListener('mousedown', (e) => {{
+            const rect = container.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            if (magicWandActive) {{
+                // Start lasso drawing
+                isDrawingLasso = true;
+                lassoPath = [{{ x, y }}];
+            }} else {{
+                // Start panning
+                isUmapDragging = true;
+                umapDragStartX = e.clientX;
+                umapDragStartY = e.clientY;
+                umapLastPanX = umapPanX;
+                umapLastPanY = umapPanY;
+                canvas.style.cursor = 'grabbing';
+            }}
+        }});
+
+        canvas.addEventListener('mousemove', (e) => {{
+            const rect = container.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            if (isDrawingLasso) {{
+                lassoPath.push({{ x, y }});
+                renderUMAP();
+            }} else if (isUmapDragging) {{
+                umapPanX = umapLastPanX + (e.clientX - umapDragStartX);
+                umapPanY = umapLastPanY + (e.clientY - umapDragStartY);
+                renderUMAP();
+            }}
+        }});
+
+        document.addEventListener('mouseup', (e) => {{
+            if (isDrawingLasso) {{
+                isDrawingLasso = false;
+                performLassoSelection();
+                lassoPath = [];
+            }}
+            if (isUmapDragging) {{
+                isUmapDragging = false;
+                canvas.style.cursor = magicWandActive ? 'crosshair' : 'grab';
+            }}
+        }});
+
+        // Zoom with mouse wheel
+        container.addEventListener('wheel', (e) => {{
+            e.preventDefault();
+            const rect = container.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+            const bounds = DATA.umap_bounds;
+            if (!bounds) return;
+
+            const dataWidth = bounds.xmax - bounds.xmin;
+            const dataHeight = bounds.ymax - bounds.ymin;
+            const padding = 20;
+            const baseScale = Math.min((rect.width - 2 * padding) / dataWidth, (rect.height - 2 * padding) / dataHeight);
+            const oldScale = baseScale * umapZoom;
+            const nextZoom = Math.max(0.1, Math.min(20, umapZoom * (e.deltaY > 0 ? 0.9 : 1.1)));
+            const newScale = baseScale * nextZoom;
+
+            const dataCenterX = (bounds.xmin + bounds.xmax) / 2;
+            const dataCenterY = (bounds.ymin + bounds.ymax) / 2;
+            const centerX = rect.width / 2 + umapPanX;
+            const centerY = rect.height / 2 + umapPanY;
+
+            const dataX = dataCenterX + (mouseX - centerX) / oldScale;
+            const dataY = dataCenterY - (mouseY - centerY) / oldScale;
+
+            const newCenterX = mouseX - (dataX - dataCenterX) * newScale;
+            const newCenterY = mouseY + (dataY - dataCenterY) * newScale;
+            umapPanX = newCenterX - rect.width / 2;
+            umapPanY = newCenterY - rect.height / 2;
+            umapZoom = nextZoom;
+
+            renderUMAP();
+        }});
+
+        canvas.style.cursor = 'grab';
+    }}
+
+    // Rendering
+    let renderAllJobId = 0;
+
+    function hideLoader() {{
+        const loader = document.getElementById('loading-overlay');
+        if (loader) loader.style.display = 'none';
+    }}
+
+    function renderSection(section, canvas) {{
+        ensureSectionXY(section);
+        const ctx = canvas.getContext('2d');
+        const dpr = getRenderDpr();
+        const rect = canvas.getBoundingClientRect();
+        canvas.width = rect.width * dpr;
+        canvas.height = rect.height * dpr;
+        ctx.scale(dpr, dpr);
+
+        const width = rect.width, height = rect.height, padding = 8;
+        ctx.fillStyle = getPanelBg();
+        ctx.fillRect(0, 0, width, height);
+
+        if (section.x.length === 0) return;
+
+        const bounds = section.bounds;
+        const dataWidth = bounds.xmax - bounds.xmin;
+        const dataHeight = bounds.ymax - bounds.ymin;
+        const scale = Math.min((width - 2*padding) / dataWidth, (height - 2*padding) / dataHeight);
+        const offsetX = padding + ((width - 2*padding) - dataWidth * scale) / 2;
+        const offsetY = padding + ((height - 2*padding) - dataHeight * scale) / 2;
+
+        const config = getColorConfig();
+        const values = getSectionValues(section);
+
+        const edges = getSectionEdgesPacked(section);
+        if (showGraph && edges && edges.length) {{
+            const graphColor = getGraphColor();
+            ctx.strokeStyle = graphColor;
+            ctx.lineWidth = Math.max(0.3, spotSize * 0.15);
+            ctx.beginPath();
+            if (Array.isArray(edges)) {{
+                for (let e = 0; e < edges.length; e++) {{
+                    const edge = edges[e];
+                    const i = edge[0];
+                    const j = edge[1];
+                    const valI = values[i];
+                    const valJ = values[j];
+                    if (valI === null || valI === undefined || valJ === null || valJ === undefined) continue;
+                    if (!config.is_continuous) {{
+                        const catIdxI = Math.round(valI);
+                        const catIdxJ = Math.round(valJ);
+                        const catNameI = config.categories[catIdxI];
+                        const catNameJ = config.categories[catIdxJ];
+                        if (hiddenCategories.has(catNameI) || hiddenCategories.has(catNameJ)) continue;
+                    }}
+                    const x1 = offsetX + (section.x[i] - bounds.xmin) * scale;
+                    const y1 = height - (offsetY + (section.y[i] - bounds.ymin) * scale);
+                    const x2 = offsetX + (section.x[j] - bounds.xmin) * scale;
+                    const y2 = height - (offsetY + (section.y[j] - bounds.ymin) * scale);
+                    ctx.moveTo(x1, y1);
+                    ctx.lineTo(x2, y2);
+                }}
+            }} else if (edges instanceof Uint32Array) {{
+                for (let e = 0; e + 1 < edges.length; e += 2) {{
+                    const i = edges[e];
+                    const j = edges[e + 1];
+                    if (i >= section.x.length || j >= section.x.length) continue;
+                    const valI = values[i];
+                    const valJ = values[j];
+                    if (valI === null || valI === undefined || valJ === null || valJ === undefined) continue;
+                    if (!config.is_continuous) {{
+                        const catIdxI = Math.round(valI);
+                        const catIdxJ = Math.round(valJ);
+                        const catNameI = config.categories[catIdxI];
+                        const catNameJ = config.categories[catIdxJ];
+                        if (hiddenCategories.has(catNameI) || hiddenCategories.has(catNameJ)) continue;
+                    }}
+                    const x1 = offsetX + (section.x[i] - bounds.xmin) * scale;
+                    const y1 = height - (offsetY + (section.y[i] - bounds.ymin) * scale);
+                    const x2 = offsetX + (section.x[j] - bounds.xmin) * scale;
+                    const y2 = height - (offsetY + (section.y[j] - bounds.ymin) * scale);
+                    ctx.moveTo(x1, y1);
+                    ctx.lineTo(x2, y2);
+                }}
+            }}
+            ctx.stroke();
+        }}
+
+        // First pass: draw grey background for hidden categories (if any are hidden)
+        const hasHidden = hiddenCategories.size > 0 && !config.is_continuous;
+        if (hasHidden) {{
+            ctx.fillStyle = '#cccccc';
+            ctx.globalAlpha = 0.2;
+            for (let i = 0; i < section.x.length; i++) {{
+                const val = values[i];
+                if (val === null || val === undefined) continue;
+                const catIdx = Math.round(val);
+                const catName = config.categories[catIdx];
+                if (!hiddenCategories.has(catName)) continue;  // Only draw hidden ones
+
+                const x = offsetX + (section.x[i] - bounds.xmin) * scale;
+                const y = offsetY + (section.y[i] - bounds.ymin) * scale;
+                ctx.beginPath();
+                ctx.arc(x, height - y, spotSize, 0, Math.PI * 2);
+                ctx.fill();
+            }}
+            ctx.globalAlpha = 1;
+        }}
+
+        // Second pass: draw visible categories on top (with optional selected-category focus)
+        const activeSpotlight = getLinkedSpotlightCategory(config);
+        const focusCategory = activeSpotlight || modalSelectedCategory;
+        const hasTypeFocus = !config.is_continuous && focusCategory;
+        for (let i = 0; i < section.x.length; i++) {{
+            const val = values[i];
+            if (val === null || val === undefined) continue;
+
+            let color;
+            let isSelectedCat = false;
+            if (config.is_continuous) {{
+                const t = (val - config.vmin) / (config.vmax - config.vmin);
+                color = magma(Math.max(0, Math.min(1, t)));
+            }} else {{
+                const catIdx = Math.round(val);
+                const catName = config.categories[catIdx];
+                if (hiddenCategories.has(catName)) continue;  // Skip hidden, already drawn as grey
+                isSelectedCat = focusCategory && catName === focusCategory;
+                color = getCategoryColor(catIdx);
+            }}
+
+            const x = offsetX + (section.x[i] - bounds.xmin) * scale;
+            const y = offsetY + (section.y[i] - bounds.ymin) * scale;
+            if (hasTypeFocus && !isSelectedCat) {{
+                ctx.fillStyle = '#bbbbbb';
+                ctx.globalAlpha = 0.15;
+            }} else {{
+                ctx.fillStyle = color;
+                ctx.globalAlpha = 1;
+            }}
+            ctx.beginPath();
+            ctx.arc(x, height - y, spotSize, 0, Math.PI * 2);
+            ctx.fill();
+        }}
+        ctx.globalAlpha = 1;
+
+        // Third pass: draw selection highlights
+        if (selectedCells.size > 0) {{
+            ctx.strokeStyle = '#ffd700';
+            ctx.lineWidth = 2;
+            for (let i = 0; i < section.x.length; i++) {{
+                if (!isCellSelected(section.id, i)) continue;
+
+                const val = values[i];
+                if (val === null || val === undefined) continue;
+
+                // Skip hidden categories
+                if (!config.is_continuous) {{
+                    const catIdx = Math.round(val);
+                    const catName = config.categories[catIdx];
+                    if (hiddenCategories.has(catName)) continue;
+                }}
+
+                const x = offsetX + (section.x[i] - bounds.xmin) * scale;
+                const y = offsetY + (section.y[i] - bounds.ymin) * scale;
+                ctx.beginPath();
+                ctx.arc(x, height - y, spotSize + 1, 0, Math.PI * 2);
+                ctx.stroke();
+            }}
+        }}
+    }}
+
+    function renderAllSections() {{
+        renderAllJobId += 1;
+        const jobId = renderAllJobId;
+        const panels = document.querySelectorAll('.section-panel');
+        const grid = document.getElementById('grid');
+        const gridRect = grid ? grid.getBoundingClientRect() : null;
+        const isInView = (panel) => {{
+            if (!gridRect) return true;
+            const r = panel.getBoundingClientRect();
+            const margin = 200;
+            return (
+                r.bottom >= gridRect.top - margin &&
+                r.top <= gridRect.bottom + margin &&
+                r.right >= gridRect.left - margin &&
+                r.left <= gridRect.right + margin
+            );
+        }};
+        let visibleCount = 0;
+        let totalCells = 0;
+        const drawList = [];
+
+        DATA.sections.forEach((section, idx) => {{
+            const panel = panels[idx];
+            if (!panel) return;
+
+            const passes = sectionPassesFilter(section);
+            panel.classList.toggle('filtered-out', !passes);
+
+            if (passes) {{
+                visibleCount++;
+                totalCells += section.n_cells;
+                const canvas = panel.querySelector('canvas');
+                if (canvas && isInView(panel)) drawList.push({{ section, canvas }});
+            }}
+        }});
+
+        // Update stats
+        const colorLabel = currentGene || currentColor;
+        document.getElementById('stats-text').textContent =
+            `${{visibleCount}}/${{DATA.n_sections}} sections | ${{totalCells.toLocaleString()}} cells | ${{colorLabel}}`;
+
+        // Show no results message
+        let noResults = document.querySelector('.no-results');
+        if (visibleCount === 0) {{
+            if (!noResults) {{
+                noResults = document.createElement('div');
+                noResults.className = 'no-results';
+                noResults.textContent = 'No sections match the current filters';
+                document.getElementById('grid').appendChild(noResults);
+            }}
+        }} else if (noResults) {{
+            noResults.remove();
+        }}
+
+        // Draw visible sections incrementally to keep the UI responsive.
+        let i = 0;
+        const step = () => {{
+            if (jobId !== renderAllJobId) return;
+            const start = performance.now();
+            while (i < drawList.length && (performance.now() - start) < 10) {{
+                const item = drawList[i++];
+                try {{
+                    renderSection(item.section, item.canvas);
+                }} catch (e) {{
+                    console.error('renderSection failed', e);
+                }}
+            }}
+            if (i < drawList.length) {{
+                requestAnimationFrame(step);
+            }}
+        }};
+        requestAnimationFrame(step);
+    }}
+
+    // Tooltip functionality
+    const tooltip = document.getElementById('cell-tooltip');
+    let tooltipTimeout = null;
+
+    function showTooltip(x, y, content) {{
+        tooltip.innerHTML = content;
+        tooltip.classList.add('visible');
+        // Position tooltip, keeping it on screen
+        const rect = tooltip.getBoundingClientRect();
+        const tooltipX = Math.min(x + 15, window.innerWidth - rect.width - 10);
+        const tooltipY = Math.min(y + 15, window.innerHeight - rect.height - 10);
+        tooltip.style.left = tooltipX + 'px';
+        tooltip.style.top = tooltipY + 'px';
+    }}
+
+    function hideTooltip() {{
+        tooltip.classList.remove('visible');
+    }}
+
+    function findNearestCell(section, mouseX, mouseY, canvasRect, transform) {{
+        ensureSectionXY(section);
+        // transform: {{ scale, offsetX, offsetY, centerX, centerY, dataCenterX, dataCenterY, isModal }}
+        const config = getColorConfig();
+        const values = getSectionValues(section);
+        const searchRadius = transform.isModal ? modalSpotSize * modalZoom * 2 : spotSize * 3;
+
+        let nearestIdx = -1;
+        let nearestDist = Infinity;
+
+        for (let i = 0; i < section.x.length; i++) {{
+            const val = values[i];
+            if (val === null || val === undefined) continue;
+
+            // Skip hidden categories
+            if (!config.is_continuous) {{
+                const catIdx = Math.round(val);
+                const catName = config.categories[catIdx];
+                if (hiddenCategories.has(catName)) continue;
+            }}
+
+            let screenX, screenY;
+            if (transform.isModal) {{
+                screenX = transform.centerX + (section.x[i] - transform.dataCenterX) * transform.scale;
+                screenY = transform.centerY - (section.y[i] - transform.dataCenterY) * transform.scale;
+            }} else {{
+                const bounds = section.bounds;
+                screenX = transform.offsetX + (section.x[i] - bounds.xmin) * transform.scale;
+                screenY = transform.height - (transform.offsetY + (section.y[i] - bounds.ymin) * transform.scale);
+            }}
+
+            const dist = Math.sqrt((mouseX - screenX) ** 2 + (mouseY - screenY) ** 2);
+            if (dist < nearestDist && dist < searchRadius) {{
+                nearestDist = dist;
+                nearestIdx = i;
+            }}
+        }}
+
+        return nearestIdx;
+    }}
+
+    function getCellTooltipContent(section, cellIdx) {{
+        const config = getColorConfig();
+        const values = getSectionValues(section);
+        const val = values[cellIdx];
+        const colorLabel = currentGene || currentColor;
+
+        if (config.is_continuous) {{
+            const t = (val - config.vmin) / (config.vmax - config.vmin);
+            const color = magma(Math.max(0, Math.min(1, t)));
+            return `<span class="cell-tooltip-color" style="background: ${{color}}"></span>
+                    <span class="cell-tooltip-label">${{colorLabel}}:</span>
+                    <span class="cell-tooltip-value">${{val.toFixed(3)}}</span>`;
+        }} else {{
+            const catIdx = Math.round(val);
+            const catName = config.categories[catIdx];
+            const color = getCategoryColor(catIdx);
+            return `<span class="cell-tooltip-color" style="background: ${{color}}"></span>
+                    <span class="cell-tooltip-label">${{catName}}</span>`;
+        }}
+    }}
+
+    // Modal rendering
+    function renderModalSection() {{
+        if (!modalSection) return;
+        ensureSectionXY(modalSection);
+
+        const canvas = document.getElementById('modal-canvas');
+        const ctx = canvas.getContext('2d');
+        const dpr = getRenderDpr();
+        const container = document.getElementById('modal-canvas-container');
+        const rect = container.getBoundingClientRect();
+        canvas.width = rect.width * dpr;
+        canvas.height = rect.height * dpr;
+        ctx.scale(dpr, dpr);
+
+        const width = rect.width, height = rect.height;
+        ctx.fillStyle = getPanelBg();
+        ctx.fillRect(0, 0, width, height);
+
+        if (modalSection.x.length === 0) return;
+
+        const bounds = modalSection.bounds;
+        const dataWidth = bounds.xmax - bounds.xmin;
+        const dataHeight = bounds.ymax - bounds.ymin;
+        const baseScale = Math.min((width - 40) / dataWidth, (height - 40) / dataHeight);
+        const scale = baseScale * modalZoom;
+
+        const centerX = width / 2 + modalPanX;
+        const centerY = height / 2 + modalPanY;
+        const dataCenterX = (bounds.xmin + bounds.xmax) / 2;
+        const dataCenterY = (bounds.ymin + bounds.ymax) / 2;
+        const adjustedSpotSize = Math.max(1, modalSpotSize * modalZoom * 0.8);
+
+        const config = getColorConfig();
+        const values = getSectionValues(modalSection);
+        const typeToggleBtn = document.getElementById('modal-type-toggle');
+        const typeClearBtn = document.getElementById('modal-type-clear');
+        if (config.is_continuous) {{
+            modalSelectedCategory = null;
+            modalTypeSelectEnabled = false;
+            typeToggleBtn?.classList.remove('active');
+        }} else if (modalSelectedCategory && !config.categories?.includes(modalSelectedCategory)) {{
+            modalSelectedCategory = null;
+        }}
+        if (typeToggleBtn) typeToggleBtn.disabled = config.is_continuous;
+        if (typeClearBtn) typeClearBtn.disabled = config.is_continuous;
+
+        const modalEdges = getSectionEdgesPacked(modalSection);
+        if (showGraph && modalEdges && modalEdges.length) {{
+            const graphColor = getGraphColor();
+            ctx.strokeStyle = graphColor;
+            ctx.lineWidth = Math.max(0.3, modalSpotSize * modalZoom * 0.12);
+            ctx.beginPath();
+            const n = modalSection.x.length;
+            const drawEdge = (i, j) => {{
+                if (i < 0 || j < 0 || i >= n || j >= n) return;
+                const valI = values[i];
+                const valJ = values[j];
+                if (valI === null || valI === undefined || valJ === null || valJ === undefined) return;
+                if (!config.is_continuous) {{
+                    const catIdxI = Math.round(valI);
+                    const catIdxJ = Math.round(valJ);
+                    const catNameI = config.categories[catIdxI];
+                    const catNameJ = config.categories[catIdxJ];
+                    if (hiddenCategories.has(catNameI) || hiddenCategories.has(catNameJ)) return;
+                }}
+                const x1 = centerX + (modalSection.x[i] - dataCenterX) * scale;
+                const y1 = centerY - (modalSection.y[i] - dataCenterY) * scale;
+                const x2 = centerX + (modalSection.x[j] - dataCenterX) * scale;
+                const y2 = centerY - (modalSection.y[j] - dataCenterY) * scale;
+                if (x1 < -adjustedSpotSize || x1 > width + adjustedSpotSize ||
+                    y1 < -adjustedSpotSize || y1 > height + adjustedSpotSize) return;
+                if (x2 < -adjustedSpotSize || x2 > width + adjustedSpotSize ||
+                    y2 < -adjustedSpotSize || y2 > height + adjustedSpotSize) return;
+                ctx.moveTo(x1, y1);
+                ctx.lineTo(x2, y2);
+            }};
+            if (Array.isArray(modalEdges)) {{
+                for (let e = 0; e < modalEdges.length; e++) {{
+                    const edge = modalEdges[e];
+                    drawEdge(edge[0], edge[1]);
+                }}
+            }} else if (modalEdges instanceof Uint32Array) {{
+                for (let e = 0; e + 1 < modalEdges.length; e += 2) {{
+                    drawEdge(modalEdges[e], modalEdges[e + 1]);
+                }}
+            }}
+            ctx.stroke();
+        }}
+
+        // First pass: draw grey background for hidden categories
+        const hasHidden = hiddenCategories.size > 0 && !config.is_continuous;
+        if (hasHidden) {{
+            ctx.fillStyle = '#cccccc';
+            ctx.globalAlpha = 0.2;
+            for (let i = 0; i < modalSection.x.length; i++) {{
+                const val = values[i];
+                if (val === null || val === undefined) continue;
+                const catIdx = Math.round(val);
+                const catName = config.categories[catIdx];
+                if (!hiddenCategories.has(catName)) continue;
+
+                const x = centerX + (modalSection.x[i] - dataCenterX) * scale;
+                const y = centerY - (modalSection.y[i] - dataCenterY) * scale;
+
+                if (x < -adjustedSpotSize || x > width + adjustedSpotSize ||
+                    y < -adjustedSpotSize || y > height + adjustedSpotSize) continue;
+
+                ctx.beginPath();
+                ctx.arc(x, y, adjustedSpotSize, 0, Math.PI * 2);
+                ctx.fill();
+            }}
+            ctx.globalAlpha = 1;
+        }}
+
+        // Second pass: draw visible categories on top (with optional selected-category focus)
+        const activeSpotlight = getLinkedSpotlightCategory(config);
+        const focusCategory = activeSpotlight || modalSelectedCategory;
+        const hasTypeFocus = !config.is_continuous && focusCategory;
+        for (let i = 0; i < modalSection.x.length; i++) {{
+            const val = values[i];
+            if (val === null || val === undefined) continue;
+
+            let color;
+            let isSelectedCat = false;
+            if (config.is_continuous) {{
+                const t = (val - config.vmin) / (config.vmax - config.vmin);
+                color = magma(Math.max(0, Math.min(1, t)));
+            }} else {{
+                const catIdx = Math.round(val);
+                const catName = config.categories[catIdx];
+                if (hiddenCategories.has(catName)) continue;
+                isSelectedCat = focusCategory && catName === focusCategory;
+                color = getCategoryColor(catIdx);
+            }}
+
+            const x = centerX + (modalSection.x[i] - dataCenterX) * scale;
+            const y = centerY - (modalSection.y[i] - dataCenterY) * scale;
+
+            if (x < -adjustedSpotSize || x > width + adjustedSpotSize ||
+                y < -adjustedSpotSize || y > height + adjustedSpotSize) continue;
+
+            if (hasTypeFocus && !isSelectedCat) {{
+                ctx.fillStyle = '#bbbbbb';
+                ctx.globalAlpha = 0.15;
+            }} else {{
+                ctx.fillStyle = color;
+                ctx.globalAlpha = 1;
+            }}
+            ctx.beginPath();
+            ctx.arc(x, y, adjustedSpotSize, 0, Math.PI * 2);
+            ctx.fill();
+        }}
+        ctx.globalAlpha = 1;
+
+        // Third pass: draw selection highlights
+        if (selectedCells.size > 0) {{
+            ctx.strokeStyle = '#ffd700';
+            ctx.lineWidth = 3;
+            for (let i = 0; i < modalSection.x.length; i++) {{
+                if (!isCellSelected(modalSection.id, i)) continue;
+
+                const val = values[i];
+                if (val === null || val === undefined) continue;
+
+                // Skip hidden categories
+                if (!config.is_continuous) {{
+                    const catIdx = Math.round(val);
+                    const catName = config.categories[catIdx];
+                    if (hiddenCategories.has(catName)) continue;
+                }}
+
+                const x = centerX + (modalSection.x[i] - dataCenterX) * scale;
+                const y = centerY - (modalSection.y[i] - dataCenterY) * scale;
+
+                if (x < -adjustedSpotSize || x > width + adjustedSpotSize ||
+                    y < -adjustedSpotSize || y > height + adjustedSpotSize) continue;
+
+                ctx.beginPath();
+                ctx.arc(x, y, adjustedSpotSize + 2, 0, Math.PI * 2);
+                ctx.stroke();
+            }}
+        }}
+
+        // No extra highlight needed: non-selected categories are greyed out above
+
+        drawNeighborHighlights(ctx, modalSection, {{
+            scale,
+            centerX,
+            centerY,
+            dataCenterX,
+            dataCenterY,
+            width,
+            height
+        }}, adjustedSpotSize);
+
+        document.getElementById('zoom-info').textContent = `${{Math.round(modalZoom * 100)}}%`;
+    }}
+
+    // Legend
+    function renderLegend(targetId = 'legend') {{
+        const legend = document.getElementById(targetId);
+        const config = getColorConfig();
+        const colorLabel = currentGene || currentColor;
+
+        if (config.is_continuous) {{
+            legend.innerHTML = `
+                <div class="legend-title">${{colorLabel}}</div>
+                <div class="colorbar-container">
+                    <canvas class="colorbar" id="${{targetId}}-colorbar"></canvas>
+                    <div class="colorbar-labels">
+                        <span>${{config.vmax.toFixed(2)}}</span>
+                        <span>${{((config.vmax + config.vmin) / 2).toFixed(2)}}</span>
+                        <span>${{config.vmin.toFixed(2)}}</span>
+                    </div>
+                </div>
+            `;
+            const colorbar = document.getElementById(`${{targetId}}-colorbar`);
+            const ctx = colorbar.getContext('2d');
+            const dpr = getRenderDpr();
+            colorbar.width = 16 * dpr;
+            colorbar.height = 150 * dpr;
+            ctx.scale(dpr, dpr);
+            for (let i = 0; i < 150; i++) {{
+                ctx.fillStyle = magma(1 - i / 149);
+                ctx.fillRect(0, i, 16, 1);
+            }}
+        }} else {{
+            const activeSpotlight = getLinkedSpotlightCategory(config);
+            let html = `
+                <div class="legend-title">${{colorLabel}}</div>
+                <div class="legend-actions">
+                    <button class="legend-btn" id="${{targetId}}-show-all">Show All</button>
+                    <button class="legend-btn" id="${{targetId}}-hide-all">Hide All</button>
+                    <button class="legend-btn ${{linkedSpotlightEnabled ? 'active' : ''}}" id="${{targetId}}-spotlight-toggle" title="Hover or click a category to spotlight">Spotlight</button>
+                </div>
+            `;
+            (config.categories || []).forEach((cat, idx) => {{
+                const hiddenClass = hiddenCategories.has(cat) ? 'hidden' : '';
+                const selectedClass = modalSelectedCategory && cat === modalSelectedCategory ? 'selected' : '';
+                const spotlightClass = activeSpotlight && cat === activeSpotlight ? 'spotlight' : '';
+                const dimmedClass = activeSpotlight && cat !== activeSpotlight ? 'dimmed' : '';
+                html += `<div class="legend-item ${{hiddenClass}} ${{selectedClass}} ${{spotlightClass}} ${{dimmedClass}}" data-category="${{cat}}">
+                    <div class="legend-color" style="background: ${{getCategoryColor(idx)}}"></div>
+                    <span>${{cat}}</span>
+                </div>`;
+            }});
+            legend.innerHTML = html;
+
+            document.getElementById(`${{targetId}}-show-all`)?.addEventListener('click', () => {{
+                hiddenCategories.clear();
+                if (modalSelectedCategory && config.categories?.includes(modalSelectedCategory)) {{
+                    // Keep selected category visible; focus is handled by rendering
+                    hiddenCategories.delete(modalSelectedCategory);
+                }}
+                renderLegend('legend');
+                renderLegend('modal-legend');
+                renderAllSections();
+                if (modalSection) renderModalSection();
+                if (umapVisible) renderUMAP();
+            }});
+
+            document.getElementById(`${{targetId}}-hide-all`)?.addEventListener('click', () => {{
+                (config.categories || []).forEach(cat => hiddenCategories.add(cat));
+                if (modalSelectedCategory && config.categories?.includes(modalSelectedCategory)) {{
+                    hiddenCategories.delete(modalSelectedCategory);
+                }}
+                renderLegend('legend');
+                renderLegend('modal-legend');
+                renderAllSections();
+                if (modalSection) renderModalSection();
+                if (umapVisible) renderUMAP();
+            }});
+
+            document.getElementById(`${{targetId}}-spotlight-toggle`)?.addEventListener('click', () => {{
+                linkedSpotlightEnabled = !linkedSpotlightEnabled;
+                if (!linkedSpotlightEnabled) {{
+                    spotlightPinnedCategory = null;
+                    spotlightHoverCategory = null;
+                }}
+                updateAllLegendSpotlightClasses();
+                rerenderForSpotlightChange();
+            }});
+
+            legend.querySelectorAll('.legend-item').forEach(item => {{
+                item.addEventListener('mouseenter', () => {{
+                    if (!linkedSpotlightEnabled) return;
+                    const cat = item.dataset.category;
+                    if (!cat || spotlightHoverCategory === cat) return;
+                    spotlightHoverCategory = cat;
+                    updateAllLegendSpotlightClasses();
+                    rerenderForSpotlightChange();
+                }});
+                item.addEventListener('mouseleave', () => {{
+                    if (!linkedSpotlightEnabled) return;
+                    const cat = item.dataset.category;
+                    if (!cat || spotlightHoverCategory !== cat) return;
+                    spotlightHoverCategory = null;
+                    updateAllLegendSpotlightClasses();
+                    rerenderForSpotlightChange();
+                }});
+                item.addEventListener('click', () => {{
+                    const cat = item.dataset.category;
+                    if (linkedSpotlightEnabled) {{
+                        if (hiddenCategories.has(cat)) hiddenCategories.delete(cat);
+                        if (spotlightPinnedCategory === cat) spotlightPinnedCategory = null;
+                        else spotlightPinnedCategory = cat;
+                        spotlightHoverCategory = null;
+                        renderLegend('legend');
+                        renderLegend('modal-legend');
+                        rerenderForSpotlightChange();
+                        return;
+                    }}
+                    if (hiddenCategories.has(cat)) hiddenCategories.delete(cat);
+                    else hiddenCategories.add(cat);
+                    renderLegend('legend');
+                    renderLegend('modal-legend');
+                    renderAllSections();
+                    if (modalSection) renderModalSection();
+                    if (umapVisible) renderUMAP();
+                }});
+            }});
+            updateLegendSpotlightClasses(targetId);
+        }}
+    }}
+
+    function buildColorPanel() {{
+        const panel = document.getElementById('color-panel');
+        if (!panel) return;
+        const metadataKeys = Object.keys(DATA.metadata_filters || {{}});
+        const hasMetadata = metadataKeys.length > 0;
+
+        const options = ['<option value="">None</option>']
+            .concat(metadataKeys.map(key => `<option value="${{key}}">${{formatMetadataLabel(key)}}</option>`))
+            .join('');
+
+        panel.innerHTML = `
+            <div class="color-panel-header">
+                <div class="color-panel-title">Color explorer</div>
+            </div>
+            <div class="color-panel-section">
+                <label>Search colors</label>
+                <input class="color-search" id="color-search" type="text" placeholder="Type to filter...">
+            </div>
+            <div class="color-panel-section">
+                <label>Available colors</label>
+                <div class="color-list" id="color-list"></div>
+            </div>
+            <div class="color-panel-section">
+                <label>Details</label>
+                <div class="color-tabs">
+                    <button class="color-tab active" id="color-tab-aggregate" type="button">Stats</button>
+                    <button class="color-tab" id="color-tab-neighbors" type="button">Neighbors</button>
+                    <button class="color-tab" id="color-tab-genes" type="button">Genes</button>
+                </div>
+                <div class="color-tab-content active" id="color-tab-aggregate-content">
+                    <div>
+                        <label>Aggregate by</label>
+                        <select id="color-groupby" ${{!hasMetadata ? 'disabled' : ''}}>
+                            ${{options}}
+                        </select>
+                    </div>
+                    <div style="display: flex; justify-content: flex-end;">
+                        <button class="legend-btn" id="color-aggregation-toggle" type="button">Collapse stats</button>
+                    </div>
+                    <div class="color-aggregation" id="color-aggregation">
+                        <div class="agg-group-meta">${{hasMetadata ? 'Pick a metadata column to summarize.' : 'No metadata columns available for aggregation.'}}</div>
+                    </div>
+                    <div>
+                        <label>Cell type trend</label>
+                        <input class="color-search" id="celltype-search" type="text" placeholder="Search cell type...">
+                    </div>
+                    <div class="color-aggregation" id="celltype-trend">
+                        <div class="agg-group-meta">${{hasMetadata ? 'Search for a category to see counts across the selected metadata.' : 'No metadata columns available.'}}</div>
+                    </div>
+                </div>
+                <div class="color-tab-content" id="color-tab-neighbors-content">
+                    <div>
+                        <label>Search cell type</label>
+                        <input class="color-search" id="neighbor-search" type="text" placeholder="Search cell type...">
+                    </div>
+                    <div style="display: flex; justify-content: flex-end;">
+                        <button class="legend-btn" id="neighbor-stats-toggle" type="button">Collapse neighbor stats</button>
+                    </div>
+                    <div class="color-aggregation" id="neighbor-stats">
+                        <div class="agg-group-meta">Select a categorical color to view neighbor stats.</div>
+                    </div>
+                    <div>
+                        <label>Interaction source</label>
+                        <select id="interaction-source"></select>
+                    </div>
+                    <div>
+                        <label>Target filter</label>
+                        <input class="color-search" id="interaction-search" type="text" placeholder="Filter target cell types...">
+                    </div>
+                    <div class="color-aggregation" id="interaction-browser">
+                        <div class="agg-group-meta">Select a source cell type to browse interactions.</div>
+                    </div>
+                </div>
+                <div class="color-tab-content" id="color-tab-genes-content">
+                    <div class="color-tabs">
+                        <button class="color-tab active" id="genes-tab-dotplot" type="button">Dotplot</button>
+                        <button class="color-tab" id="genes-tab-markers" type="button">Markers</button>
+                    </div>
+                    <div class="color-tab-content active" id="genes-tab-dotplot-content">
+                        <div class="dotplot-controls">
+                            <div>
+                                <label>Group by (categorical color)</label>
+                                <select id="dotplot-groupby"></select>
+                            </div>
+                            <div>
+                                <label>Aggregate by (metadata)</label>
+                                <select id="dotplot-aggregate-by" ${{!hasMetadata ? 'disabled' : ''}}>
+                                    ${{options}}
+                                </select>
+                            </div>
+                            <div id="dotplot-aggregate-value-wrap" style="display: none;">
+                                <label>Aggregate value</label>
+                                <select id="dotplot-aggregate-value"></select>
+                            </div>
+                            <div>
+                                <label>Genes (comma-separated)</label>
+                                <input class="color-search" id="dotplot-genes" type="text" placeholder="e.g. Cd4, Cd8a, Gfap">
+                                <div class="scale-hint">Dot size = % expressing; dot color = mean expression.</div>
+                            </div>
+                            <div style="display: flex; gap: 6px; justify-content: flex-end;">
+                                <button class="legend-btn" id="dotplot-use-hvgs" type="button">Use HVGs</button>
+                                <button class="legend-btn" id="dotplot-run" type="button">Update</button>
+                            </div>
+                            <div class="agg-group-meta" id="dotplot-status">Pick a categorical color + genes to compute a dotplot.</div>
+                            <div class="dotplot-grid" id="dotplot-grid"></div>
+                        </div>
+                    </div>
+                    <div class="color-tab-content" id="genes-tab-markers-content">
+                        <input class="marker-search" id="marker-gene-search" type="text" placeholder="Search marker genes...">
+                        <div class="marker-genes" id="marker-genes"></div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        const search = document.getElementById('color-search');
+        search.addEventListener('input', () => {{
+            renderColorList(search.value);
+        }});
+
+        const groupBy = document.getElementById('color-groupby');
+        groupBy.addEventListener('change', () => {{
+            renderColorAggregation();
+            renderCellTypeTrend();
+            const dpAgg = document.getElementById('dotplot-aggregate-by');
+            if (dpAgg) dpAgg.value = groupBy.value;
+            updateDotplotAggregateValueOptions();
+            const genesTop = document.getElementById('color-tab-genes');
+            const genesDot = document.getElementById('genes-tab-dotplot');
+            if (genesTop?.classList.contains('active') && genesDot?.classList.contains('active')) {{
+                renderDotplot();
+            }}
+        }});
+
+        const aggregationToggle = document.getElementById('color-aggregation-toggle');
+        const aggregationContainer = document.getElementById('color-aggregation');
+        aggregationToggle.addEventListener('click', () => {{
+            const isCollapsed = aggregationContainer.classList.toggle('collapsed');
+            aggregationToggle.textContent = isCollapsed ? 'Show stats' : 'Collapse stats';
+        }});
+
+        const aggregateTab = document.getElementById('color-tab-aggregate');
+        const neighborTab = document.getElementById('color-tab-neighbors');
+        const genesTab = document.getElementById('color-tab-genes');
+        const aggregateContent = document.getElementById('color-tab-aggregate-content');
+        const neighborContent = document.getElementById('color-tab-neighbors-content');
+        const genesContent = document.getElementById('color-tab-genes-content');
+
+        const genesDotTab = document.getElementById('genes-tab-dotplot');
+        const genesMarkersTab = document.getElementById('genes-tab-markers');
+        const genesDotContent = document.getElementById('genes-tab-dotplot-content');
+        const genesMarkersContent = document.getElementById('genes-tab-markers-content');
+        aggregateTab.addEventListener('click', () => {{
+            aggregateTab.classList.add('active');
+            neighborTab.classList.remove('active');
+            genesTab.classList.remove('active');
+            aggregateContent.classList.add('active');
+            neighborContent.classList.remove('active');
+            genesContent.classList.remove('active');
+            renderColorAggregation();
+            renderCellTypeTrend();
+        }});
+        neighborTab.addEventListener('click', () => {{
+            neighborTab.classList.add('active');
+            aggregateTab.classList.remove('active');
+            genesTab.classList.remove('active');
+            neighborContent.classList.add('active');
+            aggregateContent.classList.remove('active');
+            genesContent.classList.remove('active');
+            renderNeighborStats();
+            renderInteractionBrowser();
+        }});
+        genesTab.addEventListener('click', () => {{
+            genesTab.classList.add('active');
+            aggregateTab.classList.remove('active');
+            neighborTab.classList.remove('active');
+            genesContent.classList.add('active');
+            aggregateContent.classList.remove('active');
+            neighborContent.classList.remove('active');
+            // Default to Dotplot subtab.
+            if (!genesDotTab.classList.contains('active') && !genesMarkersTab.classList.contains('active')) {{
+                genesDotTab.classList.add('active');
+                genesMarkersTab.classList.remove('active');
+                genesDotContent.classList.add('active');
+                genesMarkersContent.classList.remove('active');
+            }}
+            if (genesDotTab.classList.contains('active')) renderDotplot();
+            else renderMarkerGenes();
+        }});
+
+        genesDotTab.addEventListener('click', () => {{
+            genesDotTab.classList.add('active');
+            genesMarkersTab.classList.remove('active');
+            genesDotContent.classList.add('active');
+            genesMarkersContent.classList.remove('active');
+            renderDotplot();
+        }});
+        genesMarkersTab.addEventListener('click', () => {{
+            genesMarkersTab.classList.add('active');
+            genesDotTab.classList.remove('active');
+            genesMarkersContent.classList.add('active');
+            genesDotContent.classList.remove('active');
+            renderMarkerGenes();
+        }});
+
+        const markerSearch = document.getElementById('marker-gene-search');
+        markerSearch.addEventListener('input', () => {{
+            if (genesTab.classList.contains('active') && genesMarkersTab.classList.contains('active')) {{
+                renderMarkerGenes();
+            }}
+        }});
+
+        const celltypeSearch = document.getElementById('celltype-search');
+        celltypeSearch.addEventListener('input', () => {{
+            renderCellTypeTrend();
+        }});
+
+        const neighborSearch = document.getElementById('neighbor-search');
+        neighborSearch.addEventListener('input', () => {{
+            renderNeighborStats();
+        }});
+        const neighborStatsToggle = document.getElementById('neighbor-stats-toggle');
+        const neighborStatsContainer = document.getElementById('neighbor-stats');
+        neighborStatsToggle.addEventListener('click', () => {{
+            const isCollapsed = neighborStatsContainer.classList.toggle('collapsed');
+            neighborStatsToggle.textContent = isCollapsed ? 'Show neighbor stats' : 'Collapse neighbor stats';
+        }});
+        const interactionSource = document.getElementById('interaction-source');
+        interactionSource.addEventListener('change', () => {{
+            interactionSourceCategory = interactionSource.value || null;
+            renderInteractionBrowser();
+        }});
+        const interactionSearch = document.getElementById('interaction-search');
+        interactionSearch.addEventListener('input', () => {{
+            renderInteractionBrowser();
+        }});
+
+        // Dotplot setup
+        const dotplotGroupby = document.getElementById('dotplot-groupby');
+        const dotplotGenes = document.getElementById('dotplot-genes');
+        const dotplotRun = document.getElementById('dotplot-run');
+        const dotplotUseHvgs = document.getElementById('dotplot-use-hvgs');
+        const dotplotAgg = document.getElementById('dotplot-aggregate-by');
+        const dotplotAggValue = document.getElementById('dotplot-aggregate-value');
+
+        const catCols = getCategoricalColorColumns();
+        if (dotplotGroupby) {{
+            dotplotGroupby.innerHTML = catCols.map(c => `<option value="${{c}}">${{c}}</option>`).join('');
+            if (catCols.includes(currentColor)) dotplotGroupby.value = currentColor;
+            dotplotGroupby.addEventListener('change', () => renderDotplot());
+        }}
+        if (dotplotAgg) {{
+            dotplotAgg.value = groupBy.value;
+            dotplotAgg.addEventListener('change', () => {{
+                groupBy.value = dotplotAgg.value;
+                renderColorAggregation();
+                renderCellTypeTrend();
+                updateDotplotAggregateValueOptions();
+                renderDotplot();
+            }});
+        }}
+        updateDotplotAggregateValueOptions();
+        dotplotAggValue?.addEventListener('change', () => renderDotplot());
+        dotplotRun?.addEventListener('click', () => renderDotplot());
+        dotplotGenes?.addEventListener('change', () => renderDotplot());
+        dotplotUseHvgs?.addEventListener('click', () => {{
+            const hvgs = (DATA.available_genes || []).slice(0, 8);
+            if (dotplotGenes) dotplotGenes.value = hvgs.join(', ');
+            renderDotplot();
+        }});
+
+        // Keep initial load fast: only render the list. Other Insights content is computed on-demand
+        // when the panel/tab is opened.
+        renderColorList('');
+        updateExpressionScaleUI();
+
+        const exprVmin = document.getElementById('expr-vmin');
+        const exprVmax = document.getElementById('expr-vmax');
+        const exprAuto = document.getElementById('expr-auto');
+        if (exprVmin && exprVmax) {{
+            const applyExpressionScale = () => {{
+                if (!currentGene) return;
+                const vmin = parseFloat(exprVmin.value);
+                const vmax = parseFloat(exprVmax.value);
+                if (!Number.isFinite(vmin) || !Number.isFinite(vmax)) return;
+                let adjMin = vmin;
+                let adjMax = vmax;
+                if (adjMin === adjMax) {{
+                    adjMin -= 1e-6;
+                    adjMax += 1e-6;
+                }} else if (adjMin > adjMax) {{
+                    const tmp = adjMin;
+                    adjMin = adjMax;
+                    adjMax = tmp;
+                }}
+                geneScaleOverrides[currentGene] = {{ vmin: adjMin, vmax: adjMax }};
+                updateExpressionScaleUI();
+                renderLegend('legend');
+                renderLegend('modal-legend');
+                renderAllSections();
+                if (modalSection) renderModalSection();
+                if (umapVisible) renderUMAP();
+            }};
+            exprVmin.addEventListener('change', applyExpressionScale);
+            exprVmax.addEventListener('change', applyExpressionScale);
+        }}
+        if (exprAuto) {{
+            exprAuto.addEventListener('click', () => {{
+                if (!currentGene) return;
+                const autoScale = computeGenePercentiles(currentGene);
+                if (autoScale) {{
+                    geneScaleAuto[currentGene] = autoScale;
+                    delete geneScaleOverrides[currentGene];
+                    updateExpressionScaleUI();
+                    renderLegend('legend');
+                    renderLegend('modal-legend');
+                    renderAllSections();
+                    if (modalSection) renderModalSection();
+                    if (umapVisible) renderUMAP();
+                }}
+            }});
+        }}
+    }}
+
+    function renderColorList(query) {{
+        const list = document.getElementById('color-list');
+        if (!list) return;
+        const q = (query || '').trim().toLowerCase();
+        const items = DATA.available_colors.filter(col => col.toLowerCase().includes(q));
+        if (items.length === 0) {{
+            list.innerHTML = `<div class="agg-group-meta">No matches.</div>`;
+            return;
+        }}
+        list.innerHTML = items.map(col => `
+            <div class="color-item ${{col === currentColor && !currentGene ? 'active' : ''}}" data-color="${{col}}">
+                ${{col}}
+            </div>
+        `).join('');
+
+        list.querySelectorAll('.color-item').forEach(item => {{
+            item.addEventListener('click', () => {{
+                const col = item.dataset.color;
+                if (!col) return;
+            currentColor = col;
+            currentGene = null;
+            modalSelectedCategory = null;
+            modalTypeSelectEnabled = false;
+            document.getElementById('color-select').value = col;
+            document.getElementById('gene-input').value = '';
+            hiddenCategories.clear();
+            updateExpressionScaleUI();
+                renderLegend('legend');
+                renderLegend('modal-legend');
+                renderAllSections();
+                if (modalSection) renderModalSection();
+                if (umapVisible) renderUMAP();
+                renderColorList(document.getElementById('color-search').value);
+                renderColorAggregation();
+                renderCellTypeTrend();
+                renderNeighborStats();
+                renderInteractionBrowser();
+                renderMarkerGenes();
+            }});
+        }});
+    }}
+
+    function renderColorAggregation() {{
+        const container = document.getElementById('color-aggregation');
+        const groupBy = document.getElementById('color-groupby');
+        if (!container || !groupBy) return;
+        const groupKey = groupBy.value;
+        if (!groupKey) {{
+            container.innerHTML = '<div class="agg-group-meta">Pick a metadata column to summarize.</div>';
+            return;
+        }}
+
+        if (currentGene) {{
+            container.innerHTML = '<div class="agg-group-meta">Aggregation is disabled while a gene is active. Clear the gene input to aggregate by categorical colors.</div>';
+            return;
+        }}
+
+        const config = getColorConfig();
+        const label = currentGene || currentColor;
+        const groups = new Map();
+
+        DATA.sections.forEach(section => {{
+            const groupVal = section.metadata?.[groupKey] || 'unknown';
+            if (!groups.has(groupVal)) {{
+                groups.set(groupVal, {{ total: 0, counts: {{}}, sum: 0, min: null, max: null }});
+            }}
+            const group = groups.get(groupVal);
+            const values = getSectionValues(section);
+            values.forEach(val => {{
+                if (val === null || val === undefined || Number.isNaN(val)) return;
+                group.total += 1;
+                if (config.is_continuous) {{
+                    group.sum += val;
+                    if (group.min === null || val < group.min) group.min = val;
+                    if (group.max === null || val > group.max) group.max = val;
+                }} else {{
+                    const catIdx = Math.round(val);
+                    const catName = config.categories?.[catIdx] || 'unknown';
+                    group.counts[catName] = (group.counts[catName] || 0) + 1;
+                }}
+            }});
+        }});
+
+        if (groups.size === 0) {{
+            container.innerHTML = '<div class="agg-group-meta">No data to summarize.</div>';
+            return;
+        }}
+
+        const entries = Array.from(groups.entries());
+        entries.sort((a, b) => a[0].localeCompare(b[0]));
+
+        if (config.is_continuous) {{
+            container.innerHTML = entries.map(([groupVal, stats]) => {{
+                const mean = stats.total > 0 ? (stats.sum / stats.total) : 0;
+                const min = stats.min !== null ? stats.min.toFixed(2) : 'n/a';
+                const max = stats.max !== null ? stats.max.toFixed(2) : 'n/a';
+                return `
+                    <div class="agg-group">
+                        <div class="agg-group-title">${{formatMetadataLabel(groupKey)}}: ${{groupVal}}</div>
+                        <div class="agg-group-meta">${{label}} · n=${{stats.total}}</div>
+                        <div class="agg-row"><span class="agg-label">Mean</span><span class="agg-value">${{mean.toFixed(2)}}</span></div>
+                        <div class="agg-row"><span class="agg-label">Min</span><span class="agg-value">${{min}}</span></div>
+                        <div class="agg-row"><span class="agg-label">Max</span><span class="agg-value">${{max}}</span></div>
+                    </div>
+                `;
+            }}).join('');
+            return;
+        }}
+
+        container.innerHTML = entries.map(([groupVal, stats]) => {{
+            const total = stats.total || 0;
+            const counts = Object.entries(stats.counts);
+            counts.sort((a, b) => b[1] - a[1]);
+            const isExpanded = expandedAggGroups.has(groupVal);
+            const top = isExpanded ? counts : counts.slice(0, 6);
+            const shownTotal = top.reduce((sum, [, c]) => sum + c, 0);
+            const other = total - shownTotal;
+            const toggleLabel = isExpanded ? 'Show top 6' : 'Show all';
+
+            const rows = top.map(([cat, count]) => {{
+                const pct = total > 0 ? Math.round((count / total) * 100) : 0;
+                const catIdx = config.categories?.indexOf(cat) ?? -1;
+                const color = catIdx >= 0 ? getCategoryColor(catIdx) : '#999';
+                return `
+                    <div class="agg-row">
+                        <span class="agg-dot" style="background: ${{color}}"></span>
+                        <span class="agg-label">${{cat}}</span>
+                        <span class="agg-value">${{pct}}% (${{count}})</span>
+                    </div>
+                `;
+            }}).join('');
+
+            const otherRow = other > 0 ? `
+                <div class="agg-row">
+                    <span class="agg-dot" style="background: #bbb"></span>
+                    <span class="agg-label">Other</span>
+                    <span class="agg-value">${{Math.round((other / total) * 100)}}% (${{other}})</span>
+                </div>
+            ` : '';
+
+            return `
+                <div class="agg-group">
+                    <div class="agg-group-title">${{formatMetadataLabel(groupKey)}}: ${{groupVal}}</div>
+                    <div class="agg-group-meta">${{label}} · n=${{total}}</div>
+                    <button class="legend-btn" data-agg-toggle="${{groupVal}}">${{toggleLabel}}</button>
+                    ${{rows}}
+                    ${{otherRow}}
+                </div>
+            `;
+        }}).join('');
+
+        container.querySelectorAll('[data-agg-toggle]').forEach(btn => {{
+            btn.addEventListener('click', () => {{
+                const key = btn.getAttribute('data-agg-toggle');
+                if (!key) return;
+                if (expandedAggGroups.has(key)) expandedAggGroups.delete(key);
+                else expandedAggGroups.add(key);
+                renderColorAggregation();
+            }});
+        }});
+    }}
+
+    function renderMarkerGenes() {{
+        const container = document.getElementById('marker-genes');
+        if (!container) return;
+        const searchInput = document.getElementById('marker-gene-search');
+        const query = (searchInput?.value || '').trim().toLowerCase();
+        const markers = DATA.marker_genes || {{}};
+
+        if (currentGene) {{
+            container.innerHTML = '<div class="agg-group-meta">Clear the gene input to view marker genes.</div>';
+            return;
+        }}
+
+        const config = getColorConfig();
+        if (config.is_continuous) {{
+            container.innerHTML = '<div class="agg-group-meta">Marker genes are available for categorical colors only.</div>';
+            return;
+        }}
+
+        const groupMarkers = markers[currentColor];
+        if (!groupMarkers || Object.keys(groupMarkers).length === 0) {{
+            container.innerHTML = '<div class="agg-group-meta">No marker genes available for this color.</div>';
+            return;
+        }}
+
+        const categories = config.categories || Object.keys(groupMarkers);
+        const rows = categories.map(cat => {{
+            const key = String(cat);
+            const genes = groupMarkers[key] || [];
+            if (query) {{
+                const hasMatch = genes.some(g => String(g).toLowerCase().includes(query));
+                if (!hasMatch) return '';
+            }}
+            const geneText = genes.length ? genes.join(' ') : 'No genes found.';
+            return `
+                <div class="marker-group">
+                    <div class="marker-group-title">${{key}}</div>
+                    <div class="marker-genes-list">${{geneText}}</div>
+                </div>
+            `;
+        }}).filter(Boolean);
+
+        if (rows.length === 0) {{
+            container.innerHTML = '<div class="agg-group-meta">No marker genes match your search.</div>';
+            return;
+        }}
+
+        container.innerHTML = rows.join('');
+    }}
+
+    function renderCellTypeTrend() {{
+        const container = document.getElementById('celltype-trend');
+        const groupBy = document.getElementById('color-groupby');
+        if (!container || !groupBy) return;
+        const groupKey = groupBy.value;
+        if (!groupKey) {{
+            container.innerHTML = '<div class="agg-group-meta">Pick a metadata column to summarize.</div>';
+            return;
+        }}
+
+        if (currentGene) {{
+            container.innerHTML = '<div class="agg-group-meta">Clear the gene input to view categorical trends.</div>';
+            return;
+        }}
+
+        const config = getColorConfig();
+        if (config.is_continuous) {{
+            container.innerHTML = '<div class="agg-group-meta">Trends are available for categorical colors only.</div>';
+            return;
+        }}
+
+        const input = document.getElementById('celltype-search');
+        const query = (input?.value || '').trim().toLowerCase();
+        if (!query) {{
+            container.innerHTML = '<div class="agg-group-meta">Search for a category to see counts across metadata groups.</div>';
+            return;
+        }}
+
+        const categories = config.categories || [];
+        const matches = categories.filter(cat => String(cat).toLowerCase().includes(query));
+        if (matches.length === 0) {{
+            container.innerHTML = '<div class="agg-group-meta">No matching categories.</div>';
+            return;
+        }}
+
+        const target = matches[0];
+        const groups = new Map();
+
+        DATA.sections.forEach(section => {{
+            const groupVal = section.metadata?.[groupKey] || 'unknown';
+            if (!groups.has(groupVal)) {{
+                groups.set(groupVal, {{ total: 0, count: 0 }});
+            }}
+            const group = groups.get(groupVal);
+            const values = getSectionValues(section);
+            values.forEach(val => {{
+                if (val === null || val === undefined || Number.isNaN(val)) return;
+                group.total += 1;
+                const catIdx = Math.round(val);
+                const catName = config.categories?.[catIdx];
+                if (catName === target) group.count += 1;
+            }});
+        }});
+
+        const entries = Array.from(groups.entries()).sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+        const rows = entries.map(([groupVal, stats]) => {{
+            const pct = stats.total > 0 ? (stats.count / stats.total) * 100 : 0;
+            return `
+                <tr>
+                    <td>${{groupVal}}</td>
+                    <td>${{stats.count}}</td>
+                    <td>${{stats.total}}</td>
+                    <td>${{pct.toFixed(1)}}%</td>
+                </tr>
+            `;
+        }}).join('');
+
+        const matchNote = matches.length > 1
+            ? `<div class="agg-group-meta">Multiple matches; showing first: <strong>${{target}}</strong></div>`
+            : `<div class="agg-group-meta">Showing: <strong>${{target}}</strong></div>`;
+
+        container.innerHTML = `
+            ${{matchNote}}
+            <table class="trend-table">
+                <thead>
+                    <tr>
+                        <th>${{formatMetadataLabel(groupKey)}}</th>
+                        <th>Count</th>
+                        <th>Total</th>
+                        <th>%</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${{rows}}
+                </tbody>
+            </table>
+        `;
+    }}
+
+    function renderNeighborStats() {{
+        const container = document.getElementById('neighbor-stats');
+        if (!container) return;
+
+        if (!DATA.has_neighbors) {{
+            container.innerHTML = '<div class="agg-group-meta">No neighbor graph was found in this dataset.</div>';
+            return;
+        }}
+
+        if (currentGene) {{
+            container.innerHTML = '<div class="agg-group-meta">Clear the gene input to view neighbor stats.</div>';
+            return;
+        }}
+
+        const config = getColorConfig();
+        if (config.is_continuous) {{
+            container.innerHTML = '<div class="agg-group-meta">Neighbor stats are available for categorical colors only.</div>';
+            return;
+        }}
+
+        const stats = (DATA.neighbor_stats || {{}})[currentColor];
+        if (!stats || !stats.counts || !stats.categories) {{
+            container.innerHTML = '<div class="agg-group-meta">No neighbor stats available for this color.</div>';
+            return;
+        }}
+
+        const categories = stats.categories || [];
+        const counts = stats.counts || [];
+        const nCells = stats.n_cells || [];
+        const meanDegree = stats.mean_degree || [];
+        const zscores = stats.zscore || null;
+        const permN = stats.perm_n || 0;
+        if (categories.length === 0 || counts.length === 0) {{
+            container.innerHTML = '<div class="agg-group-meta">Neighbor stats are empty for this color.</div>';
+            return;
+        }}
+
+        const input = document.getElementById('neighbor-search');
+        const query = (input?.value || '').trim().toLowerCase();
+        const matches = categories
+            .map((cat, idx) => (query && !String(cat).toLowerCase().includes(query)) ? null : idx)
+            .filter(idx => idx !== null);
+
+        if (matches.length === 0) {{
+            container.innerHTML = '<div class="agg-group-meta">No matching cell types.</div>';
+            return;
+        }}
+
+        const rows = matches.map((idx) => {{
+            const source = String(categories[idx]);
+            const row = counts[idx] || [];
+            const total = row.reduce((sum, val) => sum + (Number.isFinite(val) ? val : 0), 0);
+            const entries = row
+                .map((val, j) => (Number.isFinite(val) && val > 0) ? [j, val] : null)
+                .filter(Boolean)
+                .sort((a, b) => b[1] - a[1]);
+            const key = `${{currentColor}}::${{idx}}`;
+            const isExpanded = expandedNeighborGroups.has(key);
+            const top = isExpanded ? entries : entries.slice(0, 6);
+            const shownTotal = top.reduce((sum, [, v]) => sum + v, 0);
+            const other = total - shownTotal;
+            const toggleLabel = isExpanded ? 'Show top 6' : 'Show all';
+            const formatCount = (value) => {{
+                if (!Number.isFinite(value)) return '0';
+                if (Math.abs(value - Math.round(value)) < 1e-6) return Math.round(value).toLocaleString();
+                return value.toFixed(2);
+            }};
+
+            const rowsHtml = top.map(([j, val]) => {{
+                const pct = total > 0 ? (val / total) * 100 : 0;
+                const target = String(categories[j] ?? 'unknown');
+                const color = j >= 0 ? getCategoryColor(j) : '#999';
+                let zLabel = '';
+                if (zscores && zscores[idx] && Number.isFinite(zscores[idx][j])) {{
+                    zLabel = ` z=${{zscores[idx][j].toFixed(2)}}`;
+                }}
+                return `
+                    <div class="agg-row">
+                        <span class="agg-dot" style="background: ${{color}}"></span>
+                        <span class="agg-label">${{target}}</span>
+                        <span class="agg-value">${{pct.toFixed(1)}}% (${{formatCount(val)}})${{zLabel}}</span>
+                    </div>
+                `;
+            }}).join('');
+
+            const otherRow = other > 0 ? `
+                <div class="agg-row">
+                    <span class="agg-dot" style="background: #bbb"></span>
+                    <span class="agg-label">Other</span>
+                    <span class="agg-value">${{((other / total) * 100).toFixed(1)}}% (${{formatCount(other)}})</span>
+                </div>
+            ` : '';
+
+            const totalLabel = formatCount(total);
+            const nLabel = (nCells[idx] ?? 0).toLocaleString();
+            const degreeLabel = Number.isFinite(meanDegree[idx]) ? meanDegree[idx].toFixed(2) : '0.00';
+            const permLabel = permN ? ` | perms=${{permN}}` : '';
+
+            if (entries.length === 0) {{
+                return `
+                    <div class="agg-group">
+                        <div class="agg-group-title">${{source}}</div>
+                        <div class="agg-group-meta">n=${{nLabel}} | mean degree=${{degreeLabel}}</div>
+                        <div class="agg-group-meta">No neighbors found for this cell type.</div>
+                    </div>
+                `;
+            }}
+
+            return `
+                <div class="agg-group">
+                    <div class="agg-group-title">${{source}}</div>
+                    <div class="agg-group-meta">n=${{nLabel}} | mean degree=${{degreeLabel}} | neighbor edges=${{totalLabel}}${{permLabel}}</div>
+                    <button class="legend-btn" data-neighbor-toggle="${{idx}}">${{toggleLabel}}</button>
+                    ${{rowsHtml}}
+                    ${{otherRow}}
+                </div>
+            `;
+        }}).join('');
+
+        container.innerHTML = rows;
+
+        container.querySelectorAll('[data-neighbor-toggle]').forEach(btn => {{
+            btn.addEventListener('click', () => {{
+                const idx = btn.getAttribute('data-neighbor-toggle');
+                if (idx === null) return;
+                const key = `${{currentColor}}::${{idx}}`;
+                if (expandedNeighborGroups.has(key)) expandedNeighborGroups.delete(key);
+                else expandedNeighborGroups.add(key);
+                renderNeighborStats();
+            }});
+        }});
+    }}
+
+    function renderInteractionBrowser() {{
+        const container = document.getElementById('interaction-browser');
+        const sourceSelect = document.getElementById('interaction-source');
+        if (!container || !sourceSelect) return;
+
+        if (!DATA.has_neighbors) {{
+            container.innerHTML = '<div class="agg-group-meta">No neighbor graph was found in this dataset.</div>';
+            sourceSelect.innerHTML = '';
+            return;
+        }}
+        if (currentGene) {{
+            container.innerHTML = '<div class="agg-group-meta">Clear the gene input to browse cell-cell interactions.</div>';
+            sourceSelect.innerHTML = '';
+            return;
+        }}
+
+        const config = getColorConfig();
+        if (config.is_continuous) {{
+            container.innerHTML = '<div class="agg-group-meta">Interaction browser is available for categorical colors only.</div>';
+            sourceSelect.innerHTML = '';
+            return;
+        }}
+
+        const stats = (DATA.neighbor_stats || {{}})[currentColor];
+        if (!stats || !stats.counts || !stats.categories) {{
+            container.innerHTML = '<div class="agg-group-meta">No neighbor stats available for this color.</div>';
+            sourceSelect.innerHTML = '';
+            return;
+        }}
+
+        const categories = (stats.categories || []).map(cat => String(cat));
+        const counts = stats.counts || [];
+        const zscores = stats.zscore || null;
+        const nCells = stats.n_cells || [];
+        const meanDegree = stats.mean_degree || [];
+        const markers = (DATA.marker_genes || {{}})[currentColor] || {{}};
+        const interactionMarkersByColor = (DATA.interaction_markers || {{}})[currentColor] || {{}};
+        const hasInteractionMarkers = Object.keys(interactionMarkersByColor).length > 0;
+        if (categories.length === 0 || counts.length === 0) {{
+            container.innerHTML = '<div class="agg-group-meta">Interaction data is empty for this color.</div>';
+            sourceSelect.innerHTML = '';
+            return;
+        }}
+
+        const currentOptions = Array.from(sourceSelect.options).map(opt => opt.value);
+        const needsOptionsUpdate = (
+            currentOptions.length !== categories.length ||
+            currentOptions.some((value, idx) => value !== categories[idx])
+        );
+        if (needsOptionsUpdate) {{
+            sourceSelect.innerHTML = '';
+            categories.forEach(cat => {{
+                const opt = document.createElement('option');
+                opt.value = cat;
+                opt.textContent = cat;
+                sourceSelect.appendChild(opt);
+            }});
+        }}
+
+        if (interactionSourceCategory && categories.includes(interactionSourceCategory)) {{
+            sourceSelect.value = interactionSourceCategory;
+        }} else if (sourceSelect.value && categories.includes(sourceSelect.value)) {{
+            interactionSourceCategory = sourceSelect.value;
+        }} else {{
+            interactionSourceCategory = categories[0];
+            sourceSelect.value = interactionSourceCategory;
+        }}
+
+        const source = interactionSourceCategory;
+        const sourceIdx = categories.indexOf(source);
+        if (sourceIdx < 0) {{
+            container.innerHTML = '<div class="agg-group-meta">Choose a source cell type.</div>';
+            return;
+        }}
+        const sourceInteractionMarkers = interactionMarkersByColor[source] || {{}};
+
+        const row = counts[sourceIdx] || [];
+        const total = row.reduce((sum, value) => sum + (Number.isFinite(value) ? value : 0), 0);
+        const targetQuery = (document.getElementById('interaction-search')?.value || '').trim().toLowerCase();
+        const sourceMarkers = (markers[source] || []).slice(0, 6);
+        const sortedEntries = categories
+            .map((target, targetIdx) => {{
+                const count = Number(row[targetIdx] ?? 0);
+                const pct = total > 0 ? (count / total) * 100 : 0;
+                const z = (zscores && zscores[sourceIdx] && Number.isFinite(zscores[sourceIdx][targetIdx]))
+                    ? Number(zscores[sourceIdx][targetIdx])
+                    : null;
+                const targetMarkers = (markers[target] || []).slice(0, 4);
+                const contact = sourceInteractionMarkers[target] || null;
+                const contactMarkers = contact && Array.isArray(contact.genes)
+                    ? contact.genes.slice(0, 4).filter(Boolean)
+                    : [];
+                return {{ target, targetIdx, count, pct, z, targetMarkers, contact, contactMarkers }};
+            }})
+            .filter(entry => !targetQuery || entry.target.toLowerCase().includes(targetQuery))
+            .filter(entry => entry.count > 0 || (entry.z !== null && entry.z > 0))
+            .sort((a, b) => {{
+                if (a.z !== null && b.z !== null && a.z !== b.z) return b.z - a.z;
+                if (a.count !== b.count) return b.count - a.count;
+                return a.target.localeCompare(b.target);
+            }});
+
+        if (sortedEntries.length === 0) {{
+            container.innerHTML = '<div class="agg-group-meta">No target cell types match the current filter.</div>';
+            return;
+        }}
+
+        const topEntries = sortedEntries.slice(0, 12);
+        const sourceMarkerLabel = sourceMarkers.length ? sourceMarkers.join(', ') : 'No marker genes available.';
+        const sourceN = (nCells[sourceIdx] ?? 0).toLocaleString();
+        const degreeLabel = Number.isFinite(meanDegree[sourceIdx]) ? meanDegree[sourceIdx].toFixed(2) : '0.00';
+        const withContactMarkers = topEntries.filter(entry => !!entry.contact).length;
+        const rows = topEntries.map(entry => {{
+            const color = getCategoryColor(entry.targetIdx);
+            const zLabel = entry.z === null ? 'n/a' : entry.z.toFixed(2);
+            const markerLabel = entry.targetMarkers.length ? entry.targetMarkers.join(', ') : '—';
+            const contactLabel = entry.contactMarkers.length ? entry.contactMarkers.join(', ') : '—';
+            let contactMeta = 'not precomputed';
+            if (entry.contact) {{
+                const nPos = Number(entry.contact.n_contact ?? 0);
+                const nNeg = Number(entry.contact.n_non_contact ?? 0);
+                if (entry.contact.available === false) {{
+                    const minReq = Number(entry.contact.min_cells_required ?? 0);
+                    contactMeta = `n+ ${{nPos}} / n- ${{nNeg}} (need >= ${{minReq}} each)`;
+                }} else {{
+                    contactMeta = `n+ ${{nPos}} / n- ${{nNeg}}`;
+                }}
+            }}
+            return `
+                <tr>
+                    <td>
+                        <div class="interaction-target">
+                            <span class="agg-dot" style="background: ${{color}}"></span>
+                            <span>${{entry.target}}</span>
+                        </div>
+                    </td>
+                    <td>${{entry.pct.toFixed(1)}}%</td>
+                    <td>${{formatNeighborCount(entry.count)}}</td>
+                    <td>${{zLabel}}</td>
+                    <td class="interaction-markers">${{contactLabel}}<br><span style="opacity:0.75;">${{contactMeta}}</span></td>
+                    <td class="interaction-markers">${{markerLabel}}</td>
+                </tr>
+            `;
+        }}).join('');
+
+        container.innerHTML = `
+            <div class="agg-group">
+                <div class="agg-group-title">${{source}} → targets</div>
+                <div class="agg-group-meta">n=${{sourceN}} | mean degree=${{degreeLabel}} | neighbor edges=${{formatNeighborCount(total)}}</div>
+                <div class="agg-group-meta">Source markers: ${{sourceMarkerLabel}}</div>
+                <div class="agg-group-meta">Contact-conditioned markers available for ${{withContactMarkers}}/${{topEntries.length}} shown targets.</div>
+                ${{hasInteractionMarkers ? '' : '<div class="agg-group-meta">Contact markers not precomputed for this color (set interaction_markers_groupby during export).</div>'}}
+            </div>
+            <table class="trend-table">
+                <thead>
+                    <tr>
+                        <th>Target</th>
+                        <th>Share</th>
+                        <th>Edges</th>
+                        <th>Z</th>
+                        <th>Contact markers</th>
+                        <th>Type markers</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${{rows}}
+                </tbody>
+            </table>
+        `;
+    }}
+
+    function stepRange(rangeEl, delta) {{
+        if (!rangeEl) return;
+        const min = parseFloat(rangeEl.min || '0');
+        const max = parseFloat(rangeEl.max || '100');
+        const step = parseFloat(rangeEl.step || '1');
+        const current = parseFloat(rangeEl.value || '0');
+        const next = Math.min(max, Math.max(min, current + delta * step));
+        rangeEl.value = String(next);
+        rangeEl.dispatchEvent(new Event('input', {{ bubbles: true }}));
+    }}
+
+    // Filters
+    function initFilters() {{
+        const filterBar = document.getElementById('filter-bar');
+        const filters = DATA.metadata_filters || {{}};
+
+        if (Object.keys(filters).length === 0) {{
+            filterBar.style.display = 'none';
+            return;
+        }}
+
+        let html = '';
+        for (const [key, values] of Object.entries(filters)) {{
+            activeFilters[key] = new Set();  // Start with all shown
+            html += `<div class="filter-group">
+                <label>${{formatMetadataLabel(key)}}:</label>
+                <div class="filter-chips" data-filter="${{key}}">
+                    ${{values.map(v => `<span class="filter-chip" data-value="${{v}}">${{v}}</span>`).join('')}}
+                </div>
+            </div>`;
+        }}
+
+        // Add outline legend if outline metadata exists
+        if (OUTLINE_BY && filters[OUTLINE_BY] && filters[OUTLINE_BY].length > 0) {{
+            const outlineLabel = formatMetadataLabel(OUTLINE_BY);
+            html += `<div class="filter-group" style="margin-left: auto;">
+                <label>Outline (${{
+                    outlineLabel
+                }}):</label>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    ${{filters[OUTLINE_BY].map(v => `<span style="display: flex; align-items: center; gap: 3px; font-size: 10px;">
+                        <span style="width: 12px; height: 12px; border: 3px solid ${{getOutlineColor(v)}}; border-radius: 2px;"></span>
+                        ${{v}}
+                    </span>`).join('')}}
+                </div>
+            </div>`;
+        }}
+
+        filterBar.innerHTML = html;
+
+        filterBar.querySelectorAll('.filter-chip').forEach(chip => {{
+            chip.addEventListener('click', () => {{
+                const filterKey = chip.parentElement.dataset.filter;
+                const value = chip.dataset.value;
+                const filterSet = activeFilters[filterKey];
+
+                if (chip.classList.contains('active')) {{
+                    chip.classList.remove('active');
+                    filterSet.delete(value);
+                }} else {{
+                    chip.classList.add('active');
+                    filterSet.add(value);
+                }}
+
+                // Update chip states
+                const chips = chip.parentElement.querySelectorAll('.filter-chip');
+                const anyActive = filterSet.size > 0;
+                chips.forEach(c => {{
+                    c.classList.toggle('inactive', anyActive && !c.classList.contains('active'));
+                }});
+
+                renderAllSections();
+            }});
+        }});
+    }}
+
+    // Modal
+    function openModal(sectionId) {{
+        modalSection = DATA.sections.find(s => s.id === sectionId);
+        if (!modalSection) return;
+        modalZoom = 1; modalPanX = 0; modalPanY = 0;
+
+        document.getElementById('modal-title').textContent = sectionId;
+        const metaText = Object.entries(modalSection.metadata || {{}})
+            .map(([k, v]) => `${{formatMetadataLabel(k)}}: ${{v}}`).join(' | ');
+        document.getElementById('modal-meta').textContent = metaText;
+        document.getElementById('modal').classList.add('active');
+        renderLegend('modal-legend');
+        requestAnimationFrame(renderModalSection);
+    }}
+
+    function closeModal() {{
+        document.getElementById('modal').classList.remove('active');
+        modalSection = null;
+        hideTooltip();
+    }}
+
+    // Grid
+    function initGrid() {{
+        const grid = document.getElementById('grid');
+        grid.innerHTML = '';
+
+        DATA.sections.forEach(section => {{
+            const panel = document.createElement('div');
+            panel.className = 'section-panel';
+            panel.dataset.sectionId = section.id;
+
+            // Apply outline color
+            const outlineValue = OUTLINE_BY ? section.metadata?.[OUTLINE_BY] : null;
+            const borderColor = getOutlineColor(outlineValue);
+            if (borderColor) {{
+                panel.style.borderColor = borderColor;
+                panel.style.borderWidth = '3px';
+            }}
+
+            const metaParts = Object.entries(section.metadata || {{}})
+                .map(([k, v]) => `${{formatMetadataLabel(k)}}: ${{v}}`).join(' | ');
+            const metaHtml = metaParts ? `<div class="section-meta">${{metaParts}}</div>` : '';
+
+            panel.innerHTML = `
+                <div class="section-header">
+                    <div>${{section.id}}${{metaHtml}}</div>
+                    <span class="expand-icon">&#x26F6;</span>
+                </div>
+                <canvas class="section-canvas"></canvas>
+            `;
+            panel.addEventListener('click', () => openModal(section.id));
+            grid.appendChild(panel);
+        }});
+
+        // Lazy render thumbnails while scrolling (skip offscreen panels).
+        grid.addEventListener('scroll', () => {{
+            requestAnimationFrame(renderAllSections);
+        }});
+    }}
+
+    // Controls
+    function initControls() {{
+        const colorSelect = document.getElementById('color-select');
+        DATA.available_colors.forEach(col => {{
+            const opt = document.createElement('option');
+            opt.value = col;
+            opt.textContent = col;
+            opt.selected = col === currentColor;
+            colorSelect.appendChild(opt);
+        }});
+
+        const isInsightsVisible = () => {{
+            const panel = document.getElementById('color-panel');
+            return panel && !panel.classList.contains('collapsed');
+        }};
+
+        const refreshInsights = () => {{
+            if (!isInsightsVisible()) return;
+            renderColorList(document.getElementById('color-search')?.value || '');
+            const isStats = document.getElementById('color-tab-aggregate')?.classList.contains('active');
+            const isNeighbors = document.getElementById('color-tab-neighbors')?.classList.contains('active');
+            const isGenes = document.getElementById('color-tab-genes')?.classList.contains('active');
+            if (isStats) {{
+                renderColorAggregation();
+                renderCellTypeTrend();
+            }} else if (isNeighbors) {{
+                renderNeighborStats();
+                renderInteractionBrowser();
+            }} else if (isGenes) {{
+                const isDot = document.getElementById('genes-tab-dotplot')?.classList.contains('active');
+                const isMarkers = document.getElementById('genes-tab-markers')?.classList.contains('active');
+                if (isDot) renderDotplot();
+                if (isMarkers) renderMarkerGenes();
+            }}
+        }};
+
+        colorSelect.addEventListener('change', (e) => {{
+            currentColor = e.target.value;
+            currentGene = null;
+            modalSelectedCategory = null;
+            modalTypeSelectEnabled = false;
+            document.getElementById('gene-input').value = '';
+            (DATA.sections || []).forEach(s => {{ if (s && s._colorCache) s._colorCache = {{}}; }});
+            hiddenCategories.clear();
+            updateExpressionScaleUI();
+            renderLegend('legend');
+            renderLegend('modal-legend');
+            renderAllSections();
+            if (modalSection) renderModalSection();
+            if (umapVisible) renderUMAP();
+            refreshInsights();
+        }});
+
+        const geneList = document.getElementById('gene-list');
+        (DATA.available_genes || []).forEach(gene => {{
+            const opt = document.createElement('option');
+            opt.value = gene;
+            geneList.appendChild(opt);
+        }});
+
+        const geneInput = document.getElementById('gene-input');
+        geneInput.addEventListener('change', () => {{
+            const gene = geneInput.value.trim();
+            if (gene && DATA.genes_meta[gene]) {{
+                currentGene = gene;
+                geneDenseCache.clear();
+                modalSelectedCategory = null;
+                modalTypeSelectEnabled = false;
+                hiddenCategories.clear();
+                ensureGeneAutoScale(currentGene);
+                updateExpressionScaleUI();
+                renderLegend('legend');
+                renderLegend('modal-legend');
+                renderAllSections();
+                if (modalSection) renderModalSection();
+                if (umapVisible) renderUMAP();
+                refreshInsights();
+            }} else if (!gene) {{
+                currentGene = null;
+                hiddenCategories.clear();
+                updateExpressionScaleUI();
+                renderLegend('legend');
+                renderLegend('modal-legend');
+                renderAllSections();
+                if (modalSection) renderModalSection();
+                if (umapVisible) renderUMAP();
+                refreshInsights();
+            }} else if (gene) {{
+                alert(`Gene "${{gene}}" was not pre-loaded.\\nTo view it, re-export with this gene included in the genes parameter or add it to highly variable genes.`);
+            }}
+        }});
+
+        const spotRange = document.getElementById('spot-size');
+        if (spotRange) {{
+            spotRange.addEventListener('input', (e) => {{
+                spotSize = parseFloat(e.target.value);
+                renderAllSections();
+                if (modalSection) renderModalSection();
+            }});
+        }}
+        document.getElementById('spot-size-dec')?.addEventListener('click', () => stepRange(spotRange, -1));
+        document.getElementById('spot-size-inc')?.addEventListener('click', () => stepRange(spotRange, 1));
+
+        const umapRange = document.getElementById('umap-spot-size');
+        if (umapRange) {{
+            umapRange.addEventListener('input', (e) => {{
+                umapSpotSize = parseFloat(e.target.value);
+                document.getElementById('umap-spot-size-label').textContent = umapSpotSize.toFixed(1);
+                if (umapVisible) renderUMAP();
+            }});
+        }}
+        document.getElementById('umap-spot-size-dec')?.addEventListener('click', () => stepRange(umapRange, -1));
+        document.getElementById('umap-spot-size-inc')?.addEventListener('click', () => stepRange(umapRange, 1));
+
+        document.getElementById('screenshot-btn').addEventListener('click', screenshotFullPage);
+
+        // Legend toggle
+        document.getElementById('legend-toggle').addEventListener('click', () => {{
+            const legend = document.getElementById('legend');
+            const btn = document.getElementById('legend-toggle');
+            legend.classList.toggle('collapsed');
+            btn.classList.toggle('active');
+            // Re-render to adjust for new grid size
+            requestAnimationFrame(renderAllSections);
+        }});
+
+        // Color explorer toggle
+        buildColorPanel();
+        const colorToggle = document.getElementById('color-toggle');
+        const colorPanel = document.getElementById('color-panel');
+        colorToggle.addEventListener('click', () => {{
+            colorPanel.classList.toggle('collapsed');
+            colorToggle.classList.toggle('active');
+            if (!colorPanel.classList.contains('collapsed')) {{
+                if (document.getElementById('color-tab-neighbors')?.classList.contains('active')) {{
+                    renderNeighborStats();
+                    renderInteractionBrowser();
+                }} else if (document.getElementById('color-tab-genes')?.classList.contains('active')) {{
+                    if (document.getElementById('genes-tab-dotplot')?.classList.contains('active')) renderDotplot();
+                    if (document.getElementById('genes-tab-markers')?.classList.contains('active')) renderMarkerGenes();
+                }} else {{
+                    renderColorAggregation();
+                    renderCellTypeTrend();
+                }}
+            }}
+            requestAnimationFrame(renderAllSections);
+        }});
+
+        const infoTrigger = document.getElementById('info-trigger');
+        if (infoTrigger) {{
+            const infoPopover = document.getElementById('info-popover');
+            infoTrigger.addEventListener('click', (event) => {{
+                event.stopPropagation();
+                if (!infoPopover) return;
+                const isActive = infoPopover.classList.toggle('active');
+                infoPopover.setAttribute('aria-hidden', isActive ? 'false' : 'true');
+            }});
+            document.addEventListener('click', (event) => {{
+                if (!infoPopover || !infoPopover.classList.contains('active')) return;
+                if (infoPopover.contains(event.target) || event.target === infoTrigger) return;
+                infoPopover.classList.remove('active');
+                infoPopover.setAttribute('aria-hidden', 'true');
+            }});
+            document.addEventListener('keydown', (event) => {{
+                if (!infoPopover || !infoPopover.classList.contains('active')) return;
+                if (event.key === 'Escape') {{
+                    infoPopover.classList.remove('active');
+                    infoPopover.setAttribute('aria-hidden', 'true');
+                }}
+            }});
+        }}
+
+        // Neighborhood graph toggle
+        if (DATA.has_neighbors) {{
+            const graphBtn = document.getElementById('graph-toggle');
+            graphBtn.style.display = 'inline-block';
+            graphBtn.addEventListener('click', () => {{
+                showGraph = !showGraph;
+                graphBtn.classList.toggle('active', showGraph);
+                renderAllSections();
+                if (modalSection) renderModalSection();
+            }});
+
+            const neighborBtn = document.getElementById('neighbor-hover-toggle');
+            neighborBtn.style.display = 'inline-block';
+            neighborBtn.addEventListener('click', () => {{
+                neighborHoverEnabled = !neighborHoverEnabled;
+                neighborBtn.classList.toggle('active', neighborHoverEnabled);
+                if (!neighborHoverEnabled) {{
+                    hoverNeighbors = null;
+                    if (modalSection) renderModalSection();
+                }}
+            }});
+
+            const hopSelect = document.getElementById('neighbor-hop-select');
+            hopSelect.style.display = 'inline-block';
+            hopSelect.value = neighborHopMode;
+            hopSelect.addEventListener('change', () => {{
+                neighborHopMode = hopSelect.value;
+                if (modalSection) renderModalSection();
+            }});
+        }}
+    }}
+
+    function initModal() {{
+        document.getElementById('modal-close').addEventListener('click', closeModal);
+        document.getElementById('modal').addEventListener('click', (e) => {{
+            if (e.target.id === 'modal') closeModal();
+        }});
+        document.addEventListener('keydown', (e) => {{ if (e.key === 'Escape') closeModal(); }});
+
+        document.getElementById('zoom-in').addEventListener('click', () => {{
+            modalZoom = Math.min(modalZoom * 1.5, 20);
+            renderModalSection();
+        }});
+        document.getElementById('zoom-out').addEventListener('click', () => {{
+            modalZoom = Math.max(modalZoom / 1.5, 0.1);
+            renderModalSection();
+        }});
+        document.getElementById('zoom-reset').addEventListener('click', () => {{
+            modalZoom = 1; modalPanX = 0; modalPanY = 0;
+            renderModalSection();
+        }});
+
+        const modalRange = document.getElementById('modal-spot-size');
+        if (modalRange) {{
+            modalRange.addEventListener('input', (e) => {{
+                modalSpotSize = parseFloat(e.target.value);
+                document.getElementById('modal-spot-size-label').textContent = modalSpotSize;
+                renderModalSection();
+            }});
+        }}
+        document.getElementById('modal-spot-size-dec')?.addEventListener('click', () => stepRange(modalRange, -1));
+        document.getElementById('modal-spot-size-inc')?.addEventListener('click', () => stepRange(modalRange, 1));
+
+        const container = document.getElementById('modal-canvas-container');
+        container.addEventListener('wheel', (e) => {{
+            if (!modalSection) return;
+            e.preventDefault();
+            const rect = container.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            const bounds = modalSection.bounds;
+            const dataWidth = bounds.xmax - bounds.xmin;
+            const dataHeight = bounds.ymax - bounds.ymin;
+            const baseScale = Math.min((rect.width - 40) / dataWidth, (rect.height - 40) / dataHeight);
+            const oldScale = baseScale * modalZoom;
+            const nextZoom = Math.max(0.1, Math.min(20, modalZoom * (e.deltaY > 0 ? 0.9 : 1.1)));
+            const newScale = baseScale * nextZoom;
+
+            const dataCenterX = (bounds.xmin + bounds.xmax) / 2;
+            const dataCenterY = (bounds.ymin + bounds.ymax) / 2;
+            const centerX = rect.width / 2 + modalPanX;
+            const centerY = rect.height / 2 + modalPanY;
+
+            const dataX = dataCenterX + (mouseX - centerX) / oldScale;
+            const dataY = dataCenterY - (mouseY - centerY) / oldScale;
+
+            const newCenterX = mouseX - (dataX - dataCenterX) * newScale;
+            const newCenterY = mouseY + (dataY - dataCenterY) * newScale;
+            modalPanX = newCenterX - rect.width / 2;
+            modalPanY = newCenterY - rect.height / 2;
+            modalZoom = nextZoom;
+
+            renderModalSection();
+        }});
+
+        const canvas = document.getElementById('modal-canvas');
+        const typeToggleBtn = document.getElementById('modal-type-toggle');
+        const typeClearBtn = document.getElementById('modal-type-clear');
+        typeToggleBtn.addEventListener('click', () => {{
+            const config = getColorConfig();
+            if (config.is_continuous) return;
+            modalTypeSelectEnabled = !modalTypeSelectEnabled;
+            typeToggleBtn.classList.toggle('active', modalTypeSelectEnabled);
+        }});
+        typeClearBtn.addEventListener('click', () => {{
+            modalSelectedCategory = null;
+            renderAllSections();
+            renderModalSection();
+        }});
+        canvas.addEventListener('mousedown', (e) => {{
+            isDragging = true;
+            dragStartX = e.clientX; dragStartY = e.clientY;
+            lastPanX = modalPanX; lastPanY = modalPanY;
+            canvas.style.cursor = 'grabbing';
+            hideTooltip();
+        }});
+        canvas.addEventListener('click', (e) => {{
+            if (!modalSection || isDragging) return;
+            const config = getColorConfig();
+            if (config.is_continuous || !modalTypeSelectEnabled) return;
+
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+            const bounds = modalSection.bounds;
+            const dataWidth = bounds.xmax - bounds.xmin;
+            const dataHeight = bounds.ymax - bounds.ymin;
+            const baseScale = Math.min((rect.width - 40) / dataWidth, (rect.height - 40) / dataHeight);
+            const scale = baseScale * modalZoom;
+            const centerX = rect.width / 2 + modalPanX;
+            const centerY = rect.height / 2 + modalPanY;
+            const dataCenterX = (bounds.xmin + bounds.xmax) / 2;
+            const dataCenterY = (bounds.ymin + bounds.ymax) / 2;
+            const transform = {{
+                scale,
+                centerX,
+                centerY,
+                dataCenterX,
+                dataCenterY,
+                isModal: true
+            }};
+
+            const cellIdx = findNearestCell(modalSection, mouseX, mouseY, rect, transform);
+            if (cellIdx >= 0) {{
+                const values = getSectionValues(modalSection);
+                const val = values[cellIdx];
+                if (val !== null && val !== undefined) {{
+                    const catIdx = Math.round(val);
+                    const catName = config.categories[catIdx];
+                    modalSelectedCategory = catName || null;
+                    renderAllSections();
+                    renderModalSection();
+                }}
+            }}
+        }});
+        document.addEventListener('mousemove', (e) => {{
+            if (!isDragging) return;
+            modalPanX = lastPanX + (e.clientX - dragStartX);
+            modalPanY = lastPanY + (e.clientY - dragStartY);
+            renderModalSection();
+        }});
+        document.addEventListener('mouseup', () => {{
+            isDragging = false;
+            canvas.style.cursor = 'grab';
+        }});
+        canvas.style.cursor = 'grab';
+
+        // Tooltip on hover in modal
+        canvas.addEventListener('mousemove', (e) => {{
+            if (isDragging || !modalSection) return;
+
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            // Calculate transform parameters (same as renderModalSection)
+            const bounds = modalSection.bounds;
+            const dataWidth = bounds.xmax - bounds.xmin;
+            const dataHeight = bounds.ymax - bounds.ymin;
+            const baseScale = Math.min((rect.width - 40) / dataWidth, (rect.height - 40) / dataHeight);
+            const scale = baseScale * modalZoom;
+            const centerX = rect.width / 2 + modalPanX;
+            const centerY = rect.height / 2 + modalPanY;
+            const dataCenterX = (bounds.xmin + bounds.xmax) / 2;
+            const dataCenterY = (bounds.ymin + bounds.ymax) / 2;
+
+            const transform = {{
+                scale,
+                centerX,
+                centerY,
+                dataCenterX,
+                dataCenterY,
+                isModal: true
+            }};
+
+            const cellIdx = findNearestCell(modalSection, mouseX, mouseY, rect, transform);
+            if (cellIdx >= 0) {{
+                const content = getCellTooltipContent(modalSection, cellIdx);
+                showTooltip(e.clientX, e.clientY, content);
+                const changed = updateHoverNeighbors(modalSection, cellIdx);
+                if (changed) renderModalSection();
+            }} else {{
+                hideTooltip();
+                if (hoverNeighbors) {{
+                    hoverNeighbors = null;
+                    renderModalSection();
+                }}
+            }}
+        }});
+
+        canvas.addEventListener('mouseleave', () => {{
+            hideTooltip();
+            if (hoverNeighbors) {{
+                hoverNeighbors = null;
+                renderModalSection();
+            }}
+        }});
+
+        if (DATA.has_neighbors) {{
+            const modalGraphBtn = document.getElementById('modal-graph-toggle');
+            modalGraphBtn.style.display = 'inline-block';
+            modalGraphBtn.classList.toggle('active', showGraph);
+            modalGraphBtn.addEventListener('click', () => {{
+                showGraph = !showGraph;
+                modalGraphBtn.classList.toggle('active', showGraph);
+                const graphBtn = document.getElementById('graph-toggle');
+                if (graphBtn) graphBtn.classList.toggle('active', showGraph);
+                renderAllSections();
+                if (modalSection) renderModalSection();
+            }});
+
+            const modalNeighborBtn = document.getElementById('modal-neighbor-hover-toggle');
+            modalNeighborBtn.style.display = 'inline-block';
+            modalNeighborBtn.classList.toggle('active', neighborHoverEnabled);
+            modalNeighborBtn.addEventListener('click', () => {{
+                neighborHoverEnabled = !neighborHoverEnabled;
+                modalNeighborBtn.classList.toggle('active', neighborHoverEnabled);
+                const neighborBtn = document.getElementById('neighbor-hover-toggle');
+                if (neighborBtn) neighborBtn.classList.toggle('active', neighborHoverEnabled);
+                if (!neighborHoverEnabled) {{
+                    hoverNeighbors = null;
+                    if (modalSection) renderModalSection();
+                }}
+            }});
+
+            const modalHopSelect = document.getElementById('modal-neighbor-hop-select');
+            modalHopSelect.style.display = 'inline-block';
+            modalHopSelect.value = neighborHopMode;
+            modalHopSelect.addEventListener('change', () => {{
+                neighborHopMode = modalHopSelect.value;
+                const hopSelect = document.getElementById('neighbor-hop-select');
+                if (hopSelect) hopSelect.value = neighborHopMode;
+                if (modalSection) renderModalSection();
+            }});
+        }}
+    }}
+
+    // Initialize (don't wait for external resources)
+    document.addEventListener('DOMContentLoaded', () => {{
+        hydratePackedSections();
+        initTheme();
+        initGrid();
+        initControls();
+        initFilters();
+        initModal();
+        initUMAP();
+        renderLegend('legend');
+        // Hide loader immediately; render incrementally afterwards.
+        hideLoader();
+        requestAnimationFrame(renderAllSections);
+    }});
+    window.addEventListener('resize', () => {{
+        if (DATA.has_umap) applyUMAPPanelState();
+        renderAllSections();
+        if (modalSection) renderModalSection();
+        if (umapVisible) renderUMAP();
+    }});
+    </script>
+    {footer_logo}
+</body>
+</html>
+'''
+
+
+def export_to_html(
+    dataset: SpatialDataset,
+    output_path: str,
+    color: str = "leiden",
+    title: str = "Spatial Viewer",
+    min_panel_size: int = 150,
+    spot_size: float = 2,
+    downsample: Optional[int] = None,
+    theme: str = "light",
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+    outline_by: Optional[str] = "course",
+    viewer_info_html: Optional[str] = None,
+    additional_colors: Optional[List[str]] = None,
+    genes: Optional[List[str]] = None,
+    gene_encoding: str = "auto",
+    gene_sparse_zero_threshold: float = 0.8,
+    pack_arrays: bool = True,
+    pack_arrays_min_len: int = 1024,
+    hvg_limit: int = 20,
+    marker_genes_groupby: Optional[List[str]] = None,
+    marker_genes_top_n: int = 30,
+    use_hvgs: bool = True,
+    neighbor_stats_groupby: Optional[List[str]] = None,
+    neighbor_stats_permutations: Union[int, None] = None,
+    neighbor_stats_seed: int = 0,
+    interaction_markers_groupby: Optional[List[str]] = None,
+    interaction_markers_top_targets: int = 8,
+    interaction_markers_top_genes: int = 20,
+    interaction_markers_min_cells: int = 30,
+    interaction_markers_min_neighbors: int = 1,
+    interaction_markers_method: str = "wilcoxon",
+    interaction_markers_layer: Optional[str] = "normalized",
+) -> str:
+    """
+    Export spatial dataset to a standalone HTML file.
+
+    Parameters
+    ----------
+    dataset : SpatialDataset
+        Dataset to export
+    output_path : str
+        Path for output HTML file
+    color : str
+        Initial color column or gene name
+    title : str
+        Page title
+    min_panel_size : int
+        Minimum width of each section panel in pixels (default 150).
+        The grid auto-adjusts columns based on screen width.
+    spot_size : float
+        Default spot size
+    downsample : int, optional
+        Downsample cells per section (for large datasets)
+    theme : str
+        'light' or 'dark'
+    vmin, vmax : float, optional
+        Min/max for continuous color scale
+    outline_by : str, optional
+        Metadata column used to color panel outlines (default: "course")
+    viewer_info_html : str, optional
+        HTML string shown in the Info tab of the color panel.
+    additional_colors : list, optional
+        Additional obs columns to include for color switching
+    genes : list, optional
+        Gene names to include for expression visualization
+    gene_encoding : str
+        "dense", "sparse", or "auto" (default). "auto" uses sparse encoding for
+        zero-inflated genes to reduce HTML size.
+    gene_sparse_zero_threshold : float
+        Only used when gene_encoding="auto". Use sparse encoding when the
+        fraction of zeros is >= this threshold (default: 0.8).
+    pack_arrays : bool
+        Pack large per-section numeric arrays (coordinates, colors, UMAP) as base64 typed arrays
+        for smaller HTML and faster load. Default: True.
+    pack_arrays_min_len : int
+        Only pack per-section arrays when section cell count is >= this value. Default: 1024.
+    hvg_limit : int
+        Max number of highly variable genes to include (default 20)
+    marker_genes_groupby : list, optional
+        Obs columns to compute marker genes for (categorical only). If None/empty,
+        marker genes are not computed.
+    marker_genes_top_n : int
+        Number of top marker genes to keep per group
+    neighbor_stats_groupby : list, optional
+        Obs columns to compute neighbor composition stats for (categorical only).
+        If None/empty, neighbor stats are not computed.
+    neighbor_stats_permutations : int
+        Number of permutations for neighbor enrichment z-scores (0 disables)
+    neighbor_stats_seed : int
+        Random seed used for neighbor permutations
+    interaction_markers_groupby : list, optional
+        Obs columns to compute contact-conditioned interaction markers for.
+    interaction_markers_top_targets : int
+        Number of target cell types to evaluate per source.
+    interaction_markers_top_genes : int
+        Number of top DE genes to keep per source-target interaction.
+    interaction_markers_min_cells : int
+        Minimum cells required in both contact+ and contact- groups.
+    interaction_markers_min_neighbors : int
+        Minimum target neighbors to classify source cells as contact+.
+    interaction_markers_method : str
+        Method passed to scanpy.tl.rank_genes_groups (e.g. "wilcoxon", "t-test").
+    interaction_markers_layer : str, optional
+        Layer used for interaction DE (default: "normalized" if present).
+
+    Returns
+    -------
+    str
+        Path to created HTML file
+    """
+    # Theme colors
+    if theme == "dark":
+        colors = {
+            "background": "#1a1a1a",
+            "text_color": "#e0e0e0",
+            "header_bg": "#2a2a2a",
+            "panel_bg": "#2a2a2a",
+            "border_color": "#404040",
+            "input_bg": "#333333",
+            "muted_color": "#888888",
+            "hover_bg": "#3a3a3a",
+            "graph_color": "rgba(255, 255, 255, 0.12)",
+        }
+    else:
+        colors = {
+            "background": "#f5f5f5",
+            "text_color": "#1a1a1a",
+            "header_bg": "#ffffff",
+            "panel_bg": "#ffffff",
+            "border_color": "#e0e0e0",
+            "input_bg": "#ffffff",
+            "muted_color": "#666666",
+            "hover_bg": "#f0f0f0",
+            "graph_color": "rgba(0, 0, 0, 0.12)",
+        }
+
+    # Prefer highly variable genes for expression if available; otherwise use provided genes
+    hv_genes = None
+    if use_hvgs and "highly_variable" in dataset.adata.var.columns:
+        hv_mask = dataset.adata.var["highly_variable"].to_numpy(dtype=bool)
+        if hv_mask.any():
+            hv_genes = dataset.adata.var_names[hv_mask].tolist()[:max(0, int(hvg_limit))]
+    if hv_genes is not None:
+        genes = hv_genes
+
+    if outline_by and outline_by not in dataset.metadata_columns:
+        print(f"  Warning: outline_by '{outline_by}' not in metadata columns; no outlines will be shown.")
+
+    if viewer_info_html is None:
+        viewer_info_html = (
+            '<div class="info-block">'
+            '<div class="info-title">Viewer</div>'
+            '<div class="info-text">KaroSpace interactive spatial viewer for exploring '
+            'sections, cell types, and gene expression.</div>'
+            '</div>'
+            '<div class="info-block">'
+            '<div class="info-title">Contact</div>'
+            '<div class="info-list">'
+            '<div>Karolinska Institutet, Stockholm</div>'
+            '<div><a class="info-link" href="mailto:christoffer.mattsson.langseth@ki.se">'
+            'christoffer.mattsson.langseth@ki.se</a></div>'
+            '<div><a class="info-link" href="https://ki.se/personer/christoffer-mattsson-langseth" '
+            'target="_blank" rel="noopener noreferrer">Profile</a></div>'
+            '<div><a class="info-link" href="https://orcid.org/0000-0003-2230-8594" '
+            'target="_blank" rel="noopener noreferrer">ORCID</a></div>'
+            '<div><a class="info-link" href="https://www.linkedin.com/in/christoffer-mattsson-langseth-76427011a" '
+            'target="_blank" rel="noopener noreferrer">LinkedIn</a></div>'
+            '</div>'
+            '</div>'
+        )
+    viewer_info_html_safe = viewer_info_html.replace('{', '{{').replace('}', '}}')
+
+    # Get data with multiple color layers and genes
+    if neighbor_stats_groupby is None:
+        neighbor_stats_groupby = [color]
+        if additional_colors:
+            neighbor_stats_groupby.extend(additional_colors)
+
+    if neighbor_stats_permutations is None:
+        # Auto-tune: permutation z-scores are expensive for very large datasets.
+        # Keep the feature (counts + mean degree) always, but skip permutations unless requested.
+        neighbor_stats_permutations = 0 if int(dataset.adata.n_obs) >= 200_000 else 20
+
+    data = dataset.to_json_data(
+        color,
+        downsample=downsample,
+        vmin=vmin,
+        vmax=vmax,
+        additional_colors=additional_colors,
+        genes=genes,
+        gene_encoding=gene_encoding,
+        gene_sparse_zero_threshold=gene_sparse_zero_threshold,
+        section_array_pack=pack_arrays,
+        section_array_pack_min_len=pack_arrays_min_len,
+        marker_genes_groupby=marker_genes_groupby,
+        marker_genes_top_n=marker_genes_top_n,
+        neighbor_stats_groupby=neighbor_stats_groupby,
+        neighbor_stats_permutations=neighbor_stats_permutations,
+        neighbor_stats_seed=neighbor_stats_seed,
+        interaction_markers_groupby=interaction_markers_groupby,
+        interaction_markers_top_targets=interaction_markers_top_targets,
+        interaction_markers_top_genes=interaction_markers_top_genes,
+        interaction_markers_min_cells=interaction_markers_min_cells,
+        interaction_markers_min_neighbors=interaction_markers_min_neighbors,
+        interaction_markers_method=interaction_markers_method,
+        interaction_markers_layer=interaction_markers_layer,
+    )
+
+    # Theme settings
+    theme_icon = "☀️" if theme == "dark" else "🌙"
+    initial_theme = theme
+
+    # Load logo for favicon
+    logo_base64 = _load_logo_base64()
+    if logo_base64:
+        favicon_link = f'<link rel="icon" type="image/png" href="data:image/png;base64,{logo_base64}">'
+    else:
+        favicon_link = ""
+    footer_logo = (
+        '<div class="footer-logo">'
+        '<span>KaroSpace</span>'
+        '<a class="footer-link" href="https://github.com/christoffermattssonlangseth/karospace" '
+        'target="_blank" rel="noopener noreferrer">GitHub</a>'
+        '</div>'
+    )
+
+    # Generate HTML
+    metadata_labels = {
+        "last_score": "disease score",
+        "last_day": "day of sacrifice",
+    }
+    max_panel_size = int(min_panel_size * 2)
+
+    data_json_safe = json.dumps(data, separators=(',', ':')).replace("</", "<\\/")
+
+    html = HTML_TEMPLATE.format(
+        title=title,
+        min_panel_size=min_panel_size,
+        max_panel_size=max_panel_size,
+        spot_size=spot_size,
+        data_json=data_json_safe,
+        palette_json=json.dumps(DEFAULT_CATEGORICAL_PALETTE),
+        metadata_labels_json=json.dumps(metadata_labels),
+        outline_by_json=json.dumps(outline_by),
+        viewer_info_html_json=json.dumps(viewer_info_html),
+        viewer_info_html=viewer_info_html_safe,
+        theme_icon=theme_icon,
+        initial_theme=initial_theme,
+        favicon_link=favicon_link,
+        footer_logo=footer_logo,
+        **colors
+    )
+
+    # Write file
+    output_path = str(Path(output_path).resolve())
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(html)
+
+    print(f"Exported HTML viewer to: {output_path}")
+    print(f"  - {data['n_sections']} sections")
+    print(f"  - {data['total_cells']:,} cells")
+    print(f"  - {len(data['available_colors'])} color options")
+    if genes:
+        print(f"  - {len(data['genes_meta'])} genes loaded")
+        enc = data.get("gene_encodings") or {}
+        if enc:
+            n_sparse = sum(1 for v in enc.values() if v == "sparse")
+            n_dense = sum(1 for v in enc.values() if v == "dense")
+            print(f"  - gene encoding: {n_sparse} sparse, {n_dense} dense")
+
+    return output_path

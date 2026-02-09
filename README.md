@@ -70,6 +70,43 @@ python3 run_xenium_analysis.py \
 - `--sample-id-split` (default: `__`)
 - `--sample-id-index` (default: `2`)
 
+### Optional steps (CLI only)
+
+**MANA weighted aggregation (optional):**
+
+```bash
+python3 run_xenium_analysis.py \
+  --data-dir /absolute/path/to/new/dataset \
+  --out-dir /absolute/path/to/output \
+  --mana-aggregate
+```
+
+If `spatial_connectivities` is missing, the pipeline will try to build it with `squidpy`
+(Delaunay graph). You can control MANA behavior via:
+
+- `--mana-n-layers`
+- `--mana-hop-decay`
+- `--mana-distance-kernel`
+- `--mana-distance-scale`
+- `--mana-use-rep`
+- `--mana-sample-key`
+- `--mana-out-key`
+
+When `--mana-aggregate` is enabled, clustering uses the weighted representation
+(`--mana-out-key`) instead of the default PCA on `adata.X`.
+
+**KaroSpace HTML export (optional):**
+
+```bash
+python3 run_xenium_analysis.py \
+  --data-dir /absolute/path/to/new/dataset \
+  --out-dir /absolute/path/to/output \
+  --karospace-html /absolute/path/to/karospace.html
+```
+
+Use `--karospace-color`, `--karospace-groupby`, `--karospace-theme`, `--karospace-title`,
+`--karospace-min-panel-size`, `--karospace-spot-size`, and `--karospace-downsample` to tune the export.
+
 ## Outputs
 
 Written under `--out-dir`:
@@ -87,3 +124,30 @@ Use `01-path-driven-xenium-analysis.ipynb` if you want the guided workflow.
 
 1. Set `DATA_DIR` and `OUT_DIR` in Step 1.
 2. Run cells top-to-bottom.
+
+## Included utils (MANA + KaroSpace)
+
+This repo now vendors utility modules from:
+- `/Users/christoffer/work/karolinska/development/MANA/utils`
+- `/Users/christoffer/work/karolinska/development/spatial-viewer/karospace`
+
+They live under `utils/` and can be imported directly from this repo:
+
+```python
+from utils import (
+    aggregate_neighbors_weighted,
+    aggregate_neighbors_weighted_simple,
+    plot_spatial_compact_fast,
+    load_spatial_data,
+    export_to_html,
+)
+```
+
+To generate a standalone KaroSpace HTML viewer from a `.h5ad` file:
+
+```bash
+python -m utils.karospace.cli /absolute/path/to/clustered.h5ad \
+  --output karospace.html \
+  --color leiden_1 \
+  --groupby sample_id
+```

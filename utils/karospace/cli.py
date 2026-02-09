@@ -1,0 +1,185 @@
+"""
+Command-line interface for KaroSpace.
+"""
+
+import argparse
+import sys
+from pathlib import Path
+from typing import Optional
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate HTML viewer for Xenium spatial transcriptomics data"
+    )
+    parser.add_argument(
+        "input",
+        type=str,
+        help="Path to input .h5ad file"
+    )
+    parser.add_argument(
+        "-o", "--output",
+        type=str,
+        default="karospace.html",
+        help="Output HTML file path (default: karospace.html)"
+    )
+    parser.add_argument(
+        "-c", "--color",
+        type=str,
+        default="leiden",
+        help="Initial color column or gene (default: leiden)"
+    )
+    parser.add_argument(
+        "-g", "--groupby",
+        type=str,
+        default="sample_id",
+        help="Column to group sections by (default: sample_id)"
+    )
+    parser.add_argument(
+        "--min-panel-size",
+        type=int,
+        default=150,
+        help="Minimum panel width in pixels (default: 150). Grid auto-adjusts columns."
+    )
+    parser.add_argument(
+        "--spot-size",
+        type=float,
+        default=2.0,
+        help="Default spot size (default: 2.0)"
+    )
+    parser.add_argument(
+        "--downsample",
+        type=int,
+        default=None,
+        help="Downsample to N cells per section (for large datasets)"
+    )
+    parser.add_argument(
+        "--theme",
+        choices=["light", "dark"],
+        default="light",
+        help="Color theme (default: light)"
+    )
+    parser.add_argument(
+        "--title",
+        type=str,
+        default="KaroSpace",
+        help="Page title"
+    )
+    parser.add_argument(
+        "--gene-encoding",
+        choices=["auto", "dense", "sparse"],
+        default="auto",
+        help="Gene vector encoding. 'sparse' stores only non-zero indices/values (smaller HTML for zero-inflated data). (default: auto)"
+    )
+    parser.add_argument(
+        "--gene-sparse-zero-threshold",
+        type=float,
+        default=0.8,
+        help="Only used with --gene-encoding auto. Use sparse encoding when zero fraction >= threshold. (default: 0.8)"
+    )
+    parser.add_argument(
+        "--no-pack-arrays",
+        dest="pack_arrays",
+        action="store_false",
+        help="Disable base64 packing of large per-section arrays (coords/colors/UMAP)."
+    )
+    parser.add_argument(
+        "--pack-arrays-min-len",
+        type=int,
+        default=1024,
+        help="Only pack arrays when section cell count >= this value. (default: 1024)"
+    )
+    parser.set_defaults(pack_arrays=True)
+
+    parser.add_argument(
+        "--neighbor-permutations",
+        type=str,
+        default="auto",
+        help="Neighbor enrichment permutation count. Use 0 to disable, or 'auto' (default) which disables for very large datasets."
+    )
+    parser.add_argument(
+        "--neighbor-stats-groupby",
+        type=str,
+        default="auto",
+        help="Comma-separated obs columns to compute neighbor composition stats for. Use 'auto' (default) to match the initial color; empty disables."
+    )
+    parser.add_argument(
+        "--marker-genes-groupby",
+        type=str,
+        default="",
+        help="Comma-separated obs columns to compute marker genes for. Empty disables (default)."
+    )
+    parser.add_argument(
+        "--interaction-markers-groupby",
+        type=str,
+        default="",
+        help="Comma-separated obs columns to compute contact-conditioned interaction markers for. Empty disables (default)."
+    )
+
+    args = parser.parse_args()
+
+    # Check input file
+    input_path = Path(args.input)
+    if not input_path.exists():
+        print(f"Error: Input file not found: {args.input}", file=sys.stderr)
+        sys.exit(1)
+
+    if not input_path.suffix == ".h5ad":
+        print(f"Warning: Expected .h5ad file, got: {input_path.suffix}", file=sys.stderr)
+
+    # Import here to avoid slow startup for --help
+    from .data_loader import load_spatial_data
+    from .exporter import export_to_html
+
+    neighbor_perms: Optional[int]
+    if str(args.neighbor_permutations).lower() == "auto":
+        neighbor_perms = None
+    else:
+        try:
+            neighbor_perms = int(args.neighbor_permutations)
+        except ValueError:
+            print("Error: --neighbor-permutations must be an integer or 'auto'", file=sys.stderr)
+            sys.exit(2)
+    def _parse_csv(value: str):
+        cleaned = [v.strip() for v in str(value).split(",") if v.strip()]
+        return cleaned or None
+
+    if str(args.neighbor_stats_groupby).lower() == "auto":
+        neighbor_stats_groupby = [args.color]
+    else:
+        neighbor_stats_groupby = _parse_csv(args.neighbor_stats_groupby)
+    marker_genes_groupby = _parse_csv(args.marker_genes_groupby)
+    interaction_markers_groupby = _parse_csv(args.interaction_markers_groupby)
+
+    # Load and export
+    print(f"Loading data from: {args.input}")
+    dataset = load_spatial_data(
+        args.input,
+        groupby=args.groupby,
+    )
+
+    print(f"Exporting to HTML...")
+    output_path = export_to_html(
+        dataset,
+        output_path=args.output,
+        color=args.color,
+        title=args.title,
+        min_panel_size=args.min_panel_size,
+        spot_size=args.spot_size,
+        downsample=args.downsample,
+        theme=args.theme,
+        gene_encoding=args.gene_encoding,
+        gene_sparse_zero_threshold=args.gene_sparse_zero_threshold,
+        pack_arrays=args.pack_arrays,
+        pack_arrays_min_len=args.pack_arrays_min_len,
+        neighbor_stats_permutations=neighbor_perms,
+        neighbor_stats_groupby=neighbor_stats_groupby,
+        marker_genes_groupby=marker_genes_groupby,
+        interaction_markers_groupby=interaction_markers_groupby,
+    )
+
+    print(f"Done! Open {output_path} in a browser to view.")
+
+
+if __name__ == "__main__":
+    main()
