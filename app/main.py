@@ -20,7 +20,9 @@ except Exception:
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-APP_ICON_PATH = ROOT_DIR / "assets" / "logo.png"
+APP_ICON_PATH = ROOT_DIR / "assets" / "app_icon_1024.png"
+if not APP_ICON_PATH.exists():
+    APP_ICON_PATH = ROOT_DIR / "assets" / "logo.png"
 RECENT_PATH = Path.home() / ".insitucore" / "recent.json"
 LEGACY_RECENT_PATH = Path.home() / ".spatial-analysis-for-dummies" / "recent.json"
 THEME_LIGHT_PATH = Path(__file__).with_name("theme_light.qss")

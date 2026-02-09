@@ -20,6 +20,8 @@ BUNDLE_ROOT="${OUT_DIR}/${APP_NAME}-portable"
 PROJECT_DIR="${BUNDLE_ROOT}/${APP_NAME}"
 APP_PATH="${BUNDLE_ROOT}/${APP_NAME}.app"
 VENV_DIR="${PROJECT_DIR}/.venv"
+ICON_ICNS="${PROJECT_DIR}/assets/InSituCore.icns"
+ICON_GEN_SCRIPT="${PROJECT_DIR}/scripts/generate_macos_icon.py"
 
 if ! command -v osacompile >/dev/null 2>&1; then
   echo "osacompile not found. This script is macOS-only." >&2
@@ -44,6 +46,10 @@ rsync -a \
   --exclude 'dist' \
   "${REPO_ROOT}/" "${PROJECT_DIR}/"
 
+if [[ ! -f "${ICON_ICNS}" && -f "${ICON_GEN_SCRIPT}" ]]; then
+  python3 "${ICON_GEN_SCRIPT}" || true
+fi
+
 echo "Creating virtual environment..."
 python3 -m venv "${VENV_DIR}"
 "${VENV_DIR}/bin/python" -m pip install --upgrade pip
@@ -54,12 +60,15 @@ python3 -m venv "${VENV_DIR}"
 echo "Creating app launcher..."
 TMP_AS="$(mktemp)"
 cat > "${TMP_AS}" <<'EOF'
-set appPath to POSIX path of (path to me)
-set launchScript to quoted form of (appPath & "Contents/Resources/launch_insitucore.sh")
-do shell script launchScript & " >/dev/null 2>&1 &"
+ObjC.import("Foundation");
+var app = Application.currentApplication();
+app.includeStandardAdditions = true;
+var bundlePath = $.NSBundle.mainBundle.bundlePath.js;
+var launchPath = bundlePath + "/Contents/Resources/launch_insitucore.sh";
+app.doShellScript('"' + launchPath.replace(/"/g, '\\"') + '" >/dev/null 2>&1 &');
 EOF
 
-osacompile -o "${APP_PATH}" "${TMP_AS}"
+osacompile -l JavaScript -o "${APP_PATH}" "${TMP_AS}"
 rm -f "${TMP_AS}"
 
 mkdir -p "${APP_PATH}/Contents/Resources"
@@ -80,6 +89,9 @@ chmod +x "${APP_PATH}/Contents/Resources/launch_insitucore.sh"
 
 if [[ -f "${PROJECT_DIR}/assets/logo.png" ]]; then
   cp "${PROJECT_DIR}/assets/logo.png" "${APP_PATH}/Contents/Resources/logo.png"
+fi
+if [[ -f "${ICON_ICNS}" ]]; then
+  cp "${ICON_ICNS}" "${APP_PATH}/Contents/Resources/applet.icns"
 fi
 
 if [[ "${MAKE_ZIP}" == "--zip" ]]; then

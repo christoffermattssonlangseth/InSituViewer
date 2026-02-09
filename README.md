@@ -64,6 +64,12 @@ or:
 python3 run_app.py
 ```
 
+Generate/refresh macOS icon assets:
+
+```bash
+python3 scripts/generate_macos_icon.py
+```
+
 ## Open as app (macOS)
 
 Build a clickable app launcher (no Terminal window):
