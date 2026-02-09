@@ -20,6 +20,7 @@ except Exception:
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+APP_ICON_PATH = ROOT_DIR / "assets" / "logo.png"
 RECENT_PATH = Path.home() / ".insitucore" / "recent.json"
 LEGACY_RECENT_PATH = Path.home() / ".spatial-analysis-for-dummies" / "recent.json"
 THEME_LIGHT_PATH = Path(__file__).with_name("theme_light.qss")
@@ -79,6 +80,8 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("InSituCore")
         self.resize(1200, 800)
+        if APP_ICON_PATH.exists():
+            self.setWindowIcon(QtGui.QIcon(str(APP_ICON_PATH)))
 
         self.process: Optional[QtCore.QProcess] = None
         self._plot_processes: List[QtCore.QProcess] = []
@@ -910,6 +913,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
 def main() -> None:
     app = QtWidgets.QApplication(sys.argv)
+    if APP_ICON_PATH.exists():
+        app.setWindowIcon(QtGui.QIcon(str(APP_ICON_PATH)))
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

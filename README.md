@@ -64,6 +64,45 @@ or:
 python3 run_app.py
 ```
 
+## Open as app (macOS)
+
+Build a clickable app launcher (no Terminal window):
+
+```bash
+bash scripts/build_macos_app.sh
+```
+
+This creates:
+
+- `dist/InSituCore.app`
+
+Double-click `dist/InSituCore.app` in Finder to launch the app.
+Logs are written to:
+
+- `~/Library/Logs/InSituCore.log`
+
+## Portable bundle (macOS)
+
+Create a portable folder you can zip/share and run without opening Terminal:
+
+```bash
+bash scripts/build_portable_macos_bundle.sh
+```
+
+Outputs:
+
+- `dist/InSituCore-portable/InSituCore.app`
+- `dist/InSituCore-portable/InSituCore/` (project + local runtime)
+- `dist/InSituCore-portable/InSituCore.log`
+
+Create a zip in one step:
+
+```bash
+bash scripts/build_portable_macos_bundle.sh dist --zip
+```
+
+This will produce `dist/InSituCore-portable.zip`.
+
 ## App workflow
 
 1. Set `Data dir` and `Output dir`.
