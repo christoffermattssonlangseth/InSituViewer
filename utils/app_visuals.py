@@ -111,6 +111,33 @@ def generate_compartment_map(h5ad_path: Path, output_path: Path, color: Optional
     plt.close()
 
 
+def generate_spatial_map(h5ad_path: Path, output_path: Path, color: Optional[str]) -> None:
+    adata = sc.read_h5ad(h5ad_path)
+    cluster_info = _load_cluster_info_path(h5ad_path)
+
+    color_key = color or _infer_default_color(
+        adata,
+        cluster_info,
+        preferred_key="cluster_keys",
+    )
+    groupby_key = "sample_id" if "sample_id" in adata.obs.columns else "run"
+    if groupby_key not in adata.obs.columns and len(adata.obs.columns) > 0:
+        groupby_key = str(adata.obs.columns[0])
+
+    plot_spatial_compact_fast(
+        adata,
+        color=color_key,
+        groupby=groupby_key,
+        cols=3,
+        height=8,
+        shared_scale=False,
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=200)
+    plt.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate plots for the desktop app.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -124,6 +151,11 @@ def build_parser() -> argparse.ArgumentParser:
     comp.add_argument("--h5ad", required=True, help="Path to clustered.h5ad")
     comp.add_argument("--output", required=True, help="Output PNG path")
     comp.add_argument("--color", default=None, help="Color key in adata.obs")
+
+    spatial = sub.add_parser("spatial", help="Generate static spatial map")
+    spatial.add_argument("--h5ad", required=True, help="Path to clustered.h5ad")
+    spatial.add_argument("--output", required=True, help="Output PNG path")
+    spatial.add_argument("--color", default=None, help="Color key in adata.obs")
 
     return parser
 
@@ -139,6 +171,8 @@ def main() -> None:
         generate_umap_plot(h5ad_path, output_path, args.color)
     elif args.command == "compartments":
         generate_compartment_map(h5ad_path, output_path, args.color)
+    elif args.command == "spatial":
+        generate_spatial_map(h5ad_path, output_path, args.color)
 
 
 if __name__ == "__main__":

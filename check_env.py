@@ -25,6 +25,8 @@ CORE_MODULES = [
 OPTIONAL_MODULES = [
     ("squidpy", "squidpy"),
     ("louvain", "louvain"),
+    ("scvi", "scvi-tools"),
+    ("cellcharter", "cellcharter"),
     ("PySide6.QtWebEngineWidgets", "PySide6-QtWebEngine"),
 ]
 

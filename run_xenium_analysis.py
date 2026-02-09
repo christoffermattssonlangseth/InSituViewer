@@ -13,10 +13,12 @@ import scanpy as sc
 from utils.xenium_pipeline import (
     build_qc_outputs,
     export_karospace_html,
+    filter_for_clustering,
     infer_sample_id,
     load_and_concat_runs,
     maybe_run_mana,
-    preprocess_for_clustering,
+    normalize_for_clustering,
+    prepare_scvi_representation,
     run_compartment_clustering,
     run_clustering,
 )
@@ -171,14 +173,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mana-hop-decay",
         type=float,
-        default=0.5,
-        help="Hop decay for MANA aggregation (default: 0.5).",
+        default=0.2,
+        help="Hop decay for MANA aggregation (default: 0.2).",
     )
     parser.add_argument(
         "--mana-distance-kernel",
         choices=["exponential", "inverse", "gaussian", "none"],
-        default="exponential",
-        help="Distance kernel for MANA aggregation (default: exponential).",
+        default="gaussian",
+        help="Distance kernel for MANA aggregation (default: gaussian).",
     )
     parser.add_argument(
         "--mana-distance-scale",
@@ -187,19 +189,58 @@ def parse_args() -> argparse.Namespace:
         help="Distance scale for MANA kernel (default: auto).",
     )
     parser.add_argument(
+        "--mana-representation-mode",
+        choices=["scvi", "pca", "custom", "auto"],
+        default="scvi",
+        help="Feature representation for MANA aggregation (default: scvi).",
+    )
+    parser.add_argument(
         "--mana-use-rep",
         default=None,
-        help="Representation in adata.obsm to aggregate (default: adata.X).",
+        help="Representation key in adata.obsm when --mana-representation-mode=custom.",
+    )
+    parser.add_argument(
+        "--scvi-latent-key",
+        default="X_scVI",
+        help="Output key in adata.obsm for scVI latent representation (default: X_scVI).",
+    )
+    parser.add_argument(
+        "--scvi-n-latent",
+        type=int,
+        default=30,
+        help="Latent dimensions for scVI (default: 30).",
+    )
+    parser.add_argument(
+        "--scvi-max-epochs",
+        type=int,
+        default=30,
+        help="Max training epochs for scVI (default: 30).",
+    )
+    parser.add_argument(
+        "--scvi-hvg-top-genes",
+        type=int,
+        default=500,
+        help="Number of highly variable genes used to train scVI (default: 500).",
+    )
+    parser.add_argument(
+        "--scvi-hvg-flavor",
+        default="seurat_v3",
+        help="Flavor for highly_variable_genes before scVI (default: seurat_v3).",
+    )
+    parser.add_argument(
+        "--scvi-batch-key",
+        default="sample_id",
+        help="Optional obs column used as batch key for scVI (default: sample_id).",
     )
     parser.add_argument(
         "--mana-sample-key",
-        default=None,
-        help="Optional obs column to aggregate per-sample (memory-friendly).",
+        default="sample_id",
+        help="obs column to aggregate per-sample (default: sample_id).",
     )
     parser.add_argument(
         "--mana-out-key",
-        default="X_cellcharter_weighted",
-        help="Output key in adata.obsm for MANA aggregation (default: X_cellcharter_weighted).",
+        default="X_mana_gauss",
+        help="Output key in adata.obsm for MANA aggregation (default: X_mana_gauss).",
     )
     parser.add_argument(
         "--mana-compartment-resolutions",
@@ -220,14 +261,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--mana-gmm-components",
-        default="6,10,14",
-        help="Comma-separated number of components for MANA GMM compartments (default: 6,10,14).",
+        default="5,8,10,12,15,20",
+        help="Comma-separated number of components for MANA GMM compartments (default: 5,8,10,12,15,20).",
     )
     parser.add_argument(
         "--mana-gmm-covariance-type",
         choices=["full", "tied", "diag", "spherical"],
-        default="full",
-        help="Covariance type for MANA GMM compartments (default: full).",
+        default="diag",
+        help="Covariance type for MANA GMM compartments (default: diag).",
     )
     parser.add_argument(
         "--mana-gmm-random-state",
@@ -238,8 +279,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mana-gmm-n-init",
         type=int,
-        default=3,
-        help="Number of GMM initializations per component count (default: 3).",
+        default=1,
+        help="Number of GMM initializations per component count (default: 1).",
+    )
+    parser.add_argument(
+        "--mana-gmm-max-dims",
+        type=int,
+        default=30,
+        help="Max dimensions used for MANA GMM input; if exceeded, PCA reduction is applied (default: 30).",
     )
     parser.add_argument(
         "--mana-no-normalize",
@@ -352,7 +399,31 @@ def main() -> None:
 
     ad_clustered = ad.copy()
     print("STEP: Preprocessing for clustering")
-    preprocess_for_clustering(ad_clustered, args)
+    filter_for_clustering(ad_clustered, args)
+
+    mana_use_rep = args.mana_use_rep
+    if args.mana_aggregate:
+        mode = args.mana_representation_mode
+        if mode == "custom":
+            if not mana_use_rep:
+                raise ValueError(
+                    "MANA representation mode is 'custom' but no --mana-use-rep was provided."
+                )
+        elif mode == "pca":
+            mana_use_rep = "X_pca"
+        elif mode == "scvi":
+            mana_use_rep = prepare_scvi_representation(ad_clustered, args)
+        elif mode == "auto":
+            if mana_use_rep:
+                pass
+            else:
+                try:
+                    mana_use_rep = prepare_scvi_representation(ad_clustered, args)
+                except ImportError:
+                    print("STEP: scVI unavailable; falling back to X_pca for MANA")
+                    mana_use_rep = "X_pca"
+
+    normalize_for_clustering(ad_clustered, args)
     print("STEP: Running clustering workflow")
     ad_clustered, cluster_key, cluster_keys = run_clustering(ad_clustered, args, data_out_dir)
 
@@ -369,7 +440,7 @@ def main() -> None:
             hop_decay=args.mana_hop_decay,
             distance_kernel=args.mana_distance_kernel,
             distance_scale=args.mana_distance_scale,
-            use_rep=args.mana_use_rep,
+            use_rep=mana_use_rep,
             sample_key=args.mana_sample_key,
             out_key=args.mana_out_key,
             normalize_weights=args.mana_normalize_weights,
@@ -383,6 +454,8 @@ def main() -> None:
         "cluster_key": cluster_key,
         "cluster_keys": cluster_keys,
         "cluster_method": args.cluster_method,
+        "mana_representation_mode": args.mana_representation_mode,
+        "mana_use_rep": mana_use_rep,
         "compartment_key": compartment_key,
         "compartment_keys": compartment_keys,
         "mana_compartment_method": args.mana_compartment_method,

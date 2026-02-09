@@ -142,7 +142,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tabs.addTab(self._build_run_tab(), "Run")
         self.tabs.addTab(self._build_analysis_tab(), "Analysis")
         self.tabs.addTab(self._build_qc_tab(), "QC")
-        self.tabs.addTab(self._build_spatial_tab(), "Spatial")
+        self.tabs.addTab(self._build_spatial_static_tab(), "Spatial (Static)")
+        self.tabs.addTab(self._build_spatial_tab(), "Spatial (Interactive)")
         self.tabs.addTab(self._build_umap_tab(), "UMAP")
         self.tabs.addTab(self._build_compartment_tab(), "Compartments")
         tabs_card, tabs_layout = self._create_card("Workspace")
@@ -290,16 +291,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.mana_hop_decay = QtWidgets.QDoubleSpinBox()
         self.mana_hop_decay.setRange(0.0, 1.0)
         self.mana_hop_decay.setSingleStep(0.05)
-        self.mana_hop_decay.setValue(0.5)
+        self.mana_hop_decay.setValue(0.2)
         self.mana_kernel = QtWidgets.QComboBox()
         self.mana_kernel.addItems(["exponential", "inverse", "gaussian", "none"])
+        self.mana_kernel.setCurrentText("gaussian")
+        self.mana_rep_mode = QtWidgets.QComboBox()
+        self.mana_rep_mode.addItem("scVI latent (recommended)", "scvi")
+        self.mana_rep_mode.addItem("PCA embedding", "pca")
+        self.mana_rep_mode.addItem("Auto (scVI -> PCA)", "auto")
+        self.mana_rep_mode.addItem("Custom obsm key", "custom")
+        self.mana_custom_rep_edit = QtWidgets.QLineEdit("X_scVI")
+        self.mana_custom_rep_edit.setPlaceholderText("e.g. X_scVI")
 
         mana_form = QtWidgets.QFormLayout()
         mana_form.addRow(self.mana_check)
         mana_form.addRow("Layers", self.mana_layers)
         mana_form.addRow("Hop decay", self.mana_hop_decay)
         mana_form.addRow("Distance kernel", self.mana_kernel)
+        mana_form.addRow("Representation", self.mana_rep_mode)
+        mana_form.addRow("Custom rep key", self.mana_custom_rep_edit)
         options_layout.addLayout(mana_form)
+        self.mana_rep_mode.currentIndexChanged.connect(self._sync_mana_rep_controls)
+        self._sync_mana_rep_controls()
 
         self.karospace_check = QtWidgets.QCheckBox("Export KaroSpace HTML")
         self.karospace_path_edit = QtWidgets.QLineEdit()
@@ -456,13 +469,49 @@ class MainWindow(QtWidgets.QMainWindow):
         self.kmeans_random_state_spin.setEnabled(kmeans_enabled)
         self.kmeans_n_init_spin.setEnabled(kmeans_enabled)
 
+    def _sync_mana_rep_controls(self) -> None:
+        mode = str(self.mana_rep_mode.currentData())
+        self.mana_custom_rep_edit.setEnabled(mode == "custom")
+
+    def _build_spatial_static_tab(self) -> QtWidgets.QWidget:
+        widget = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(widget)
+        layout.setContentsMargins(2, 2, 2, 2)
+
+        card, card_layout = self._create_card(
+            "Spatial Map (Static)",
+            "Fast map from clustered.h5ad using plot_spatial_compact_fast.",
+        )
+
+        controls_row = QtWidgets.QHBoxLayout()
+        controls_row.setSpacing(10)
+        key_label = QtWidgets.QLabel("Color key")
+        key_label.setObjectName("CardSubtitle")
+        self.spatial_key_combo = QtWidgets.QComboBox()
+        self.spatial_key_combo.addItem("Auto (cluster key)", "")
+        self.spatial_key_combo.setEnabled(False)
+        self.generate_spatial_btn = QtWidgets.QPushButton("Generate Spatial Map")
+        self.generate_spatial_btn.clicked.connect(self._generate_spatial_map)
+        controls_row.addWidget(key_label)
+        controls_row.addWidget(self.spatial_key_combo, stretch=1)
+        controls_row.addWidget(self.generate_spatial_btn)
+        card_layout.addLayout(controls_row)
+
+        self.spatial_static_label = QtWidgets.QLabel("No spatial map found. Click Generate Spatial Map.")
+        self.spatial_static_label.setObjectName("PreviewSurface")
+        self.spatial_static_label.setAlignment(QtCore.Qt.AlignCenter)
+        self.spatial_static_label.setMinimumHeight(400)
+        card_layout.addWidget(self.spatial_static_label, stretch=1)
+        layout.addWidget(card, stretch=1)
+        return widget
+
     def _build_spatial_tab(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(widget)
         layout.setContentsMargins(2, 2, 2, 2)
 
         card, card_layout = self._create_card(
-            "Spatial Map",
+            "Spatial Map (Interactive)",
             "KaroSpace viewer output for section-level inspection.",
         )
 
@@ -554,6 +603,7 @@ class MainWindow(QtWidgets.QMainWindow):
             out_dir / "data" / "markers_by_cluster.csv",
             out_dir / "xenium_qc" / "summary_by_run.csv",
             out_dir / "xenium_qc" / "gene_detection_overall.csv",
+            out_dir / "plots" / "spatial.png",
             out_dir / "plots" / "umap.png",
             out_dir / "plots" / "compartments.png",
         ]
@@ -743,6 +793,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
 
         if self.mana_check.isChecked():
+            rep_mode = str(self.mana_rep_mode.currentData())
             args += [
                 "--mana-aggregate",
                 "--mana-n-layers",
@@ -751,7 +802,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 str(self.mana_hop_decay.value()),
                 "--mana-distance-kernel",
                 self.mana_kernel.currentText(),
+                "--mana-representation-mode",
+                rep_mode,
             ]
+            if rep_mode == "custom":
+                custom_rep = self.mana_custom_rep_edit.text().strip()
+                if not custom_rep:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Missing custom representation key",
+                        "Please provide a custom obsm key for MANA representation.",
+                    )
+                    return
+                args += ["--mana-use-rep", custom_rep]
 
         if self.karospace_check.isChecked():
             karospace_path = self.karospace_path_edit.text().strip()
@@ -815,11 +878,46 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _load_outputs(self, out_dir: Path) -> None:
         self.current_out_dir = out_dir
+        self._refresh_spatial_keys(out_dir)
         self._refresh_compartment_keys(out_dir)
         self._load_qc_images(out_dir)
         self._load_karospace(out_dir)
+        self._load_spatial_image(out_dir)
         self._load_umap_image(out_dir)
         self._load_compartment_image(out_dir)
+
+    def _refresh_spatial_keys(self, out_dir: Path) -> None:
+        keys: List[str] = []
+        cluster_info_path = out_dir / "data" / "cluster_info.json"
+        if cluster_info_path.exists():
+            try:
+                payload = json.loads(cluster_info_path.read_text())
+            except json.JSONDecodeError:
+                payload = {}
+
+            ordered_sources = [
+                payload.get("cluster_key"),
+                payload.get("compartment_key"),
+                payload.get("cluster_keys"),
+                payload.get("compartment_keys"),
+            ]
+            for source in ordered_sources:
+                if isinstance(source, list):
+                    candidates = source
+                else:
+                    candidates = [source]
+                for key in candidates:
+                    key_text = str(key or "").strip()
+                    if key_text and key_text not in keys:
+                        keys.append(key_text)
+
+        self.spatial_key_combo.blockSignals(True)
+        self.spatial_key_combo.clear()
+        self.spatial_key_combo.addItem("Auto (cluster key)", "")
+        for key in keys:
+            self.spatial_key_combo.addItem(key, key)
+        self.spatial_key_combo.setEnabled(bool(keys))
+        self.spatial_key_combo.blockSignals(False)
 
     def _refresh_compartment_keys(self, out_dir: Path) -> None:
         keys: List[str] = []
@@ -912,6 +1010,14 @@ class MainWindow(QtWidgets.QMainWindow):
             QtCore.QUrl.fromLocalFile(str(self.current_karospace_html))
         )
 
+    def _load_spatial_image(self, out_dir: Path) -> None:
+        plot_path = out_dir / "plots" / "spatial.png"
+        if plot_path.exists():
+            pixmap = QtGui.QPixmap(str(plot_path))
+            self.spatial_static_label.setPixmap(pixmap.scaledToWidth(900, QtCore.Qt.SmoothTransformation))
+        else:
+            self.spatial_static_label.setText("No spatial map found. Click Generate Spatial Map.")
+
     def _load_umap_image(self, out_dir: Path) -> None:
         plot_path = out_dir / "plots" / "umap.png"
         if plot_path.exists():
@@ -927,6 +1033,44 @@ class MainWindow(QtWidgets.QMainWindow):
             self.compartment_label.setPixmap(pixmap.scaledToWidth(900, QtCore.Qt.SmoothTransformation))
         else:
             self.compartment_label.setText("No compartment map found. Click Generate Compartment Map.")
+
+    def _generate_spatial_map(self) -> None:
+        if not self.current_out_dir:
+            QtWidgets.QMessageBox.warning(self, "Missing output", "Load outputs first.")
+            return
+
+        h5ad_path = self.current_out_dir / "data" / "clustered.h5ad"
+        if not h5ad_path.exists():
+            QtWidgets.QMessageBox.warning(self, "Missing file", "clustered.h5ad not found.")
+            return
+
+        output_dir = self.current_out_dir / "plots"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / "spatial.png"
+        if not self._confirm_overwrite(
+            [output_path] if output_path.exists() else [],
+            title="Existing plot found",
+            prompt="Regenerate spatial map and overwrite existing file?",
+        ):
+            self._log("Spatial map generation cancelled by user.")
+            return
+
+        args = [
+            sys.executable,
+            "-u",
+            "-m",
+            "utils.app_visuals",
+            "spatial",
+            "--h5ad",
+            str(h5ad_path),
+            "--output",
+            str(output_path),
+        ]
+        selected_key = str(self.spatial_key_combo.currentData() or "").strip()
+        if selected_key:
+            args += ["--color", selected_key]
+
+        self._run_visual_process(args, output_path, self.spatial_static_label)
 
     def _generate_umap_plot(self) -> None:
         if not self.current_out_dir:

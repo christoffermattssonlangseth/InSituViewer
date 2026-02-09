@@ -4,7 +4,7 @@ Local desktop app for Xenium-style spatial transcriptomics analysis.
 
 `InSituCore` lets you run the pipeline and inspect results in one place:
 - QC plots
-- Spatial maps (KaroSpace)
+- Spatial maps (static plot + optional KaroSpace)
 - UMAP
 - MANA-based compartment maps
 
@@ -32,6 +32,9 @@ pip install -r requirements-optional.txt
 
 - `squidpy` is used when MANA needs to build spatial neighbors from coordinates.
 - `louvain` is required only when using Louvain clustering.
+- `scvi-tools` is required when using scVI latent representation for MANA.
+- `cellcharter` is optional and used to remove long spatial links after graph construction.
+- MANA spatial graph is built per sample (`library_key=sample_id` when available) to avoid cross-sample edges.
 - Embedded KaroSpace in-app requires `PySide6.QtWebEngineWidgets`.
   Depending on Python and platform, this may come from `PySide6` directly or require:
 
@@ -123,9 +126,11 @@ This will produce `dist/InSituCore-portable.zip`.
 - neighbors / PCs / UMAP min_dist
 - clustering method (`Leiden`, `Louvain`, or `KMeans`)
 - method-specific sweep values (resolutions or K list)
-7. Click `Run`.
-8. Use top-bar actions: `Load Outputs`, `Generate UMAP`, `Generate Compartments`.
-9. For compartments, choose a compartment key in the `Compartment Map` tab:
+7. In `Run` -> `Optional Steps`, choose MANA representation (`scVI` recommended).
+8. Click `Run`.
+9. Use top-bar actions: `Load Outputs`, `Generate UMAP`, `Generate Compartments`.
+10. Use `Spatial (Static)` tab for `Generate Spatial Map` (fast native plot) and `Spatial (Interactive)` for KaroSpace.
+11. For compartments, choose a compartment key in the `Compartment Map` tab:
 - `Auto (primary)` uses the pipeline-selected default.
 - Or choose a specific key like `compartment_gmm_k6` / `compartment_leiden_1.0`.
 
@@ -166,6 +171,7 @@ Written under `--out-dir`:
 - `xenium_qc/summary_by_run.csv`
 - `xenium_qc/gene_detection_overall.csv`
 - `xenium_qc/*.png`
+- `plots/spatial.png` (generated from `Spatial (Static)` tab)
 - `plots/umap.png` (generated from app action)
 - `plots/compartments.png` (generated from app action)
 - `karospace.html` (if export enabled)
@@ -189,8 +195,14 @@ Useful options:
 - `--n-neighbors`, `--n-pcs`, `--umap-min-dist`
 - `--leiden-resolutions`, `--louvain-resolutions`, `--kmeans-clusters`
 - `--mana-aggregate`
+- `--mana-representation-mode` (`scvi`, `pca`, `custom`, `auto`; default `scvi`)
+- `--scvi-latent-key`, `--scvi-n-latent`, `--scvi-max-epochs` (default `30`)
+- `--scvi-hvg-top-genes` (default `500`) and `--scvi-hvg-flavor` (`seurat_v3`)
+- notebook-like MANA defaults: `--mana-distance-kernel gaussian`, `--mana-hop-decay 0.2`, `--mana-out-key X_mana_gauss`
 - `--mana-compartment-method` (`gmm`, `leiden`, `both`; default `gmm`)
 - `--mana-gmm-components` (e.g. `6,10,14`)
+- `--mana-gmm-max-dims` (PCA cap before GMM; default `30`)
+- `--mana-gmm-covariance-type` (default `diag`, safer for large data)
 - `--mana-compartment-resolutions` (for Leiden compartments)
 - `--karospace-html /absolute/path/to/karospace.html`
 

@@ -1,2 +1,4 @@
 squidpy
 louvain
+scvi-tools
+cellcharter

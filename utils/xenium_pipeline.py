@@ -16,6 +16,7 @@ import scanpy as sc
 import seaborn as sns
 from scipy import sparse
 from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
 from sklearn.mixture import GaussianMixture
 
 from .mana import aggregate_neighbors_weighted
@@ -428,7 +429,20 @@ def run_compartment_clustering(
         if not component_tokens:
             raise ValueError("No valid MANA GMM components were provided.")
 
-        rep = np.asarray(ad.obsm[args.mana_out_key])
+        rep = np.asarray(ad.obsm[args.mana_out_key], dtype=np.float32)
+        if rep.ndim != 2:
+            raise ValueError(
+                f"Expected 2D MANA representation in adata.obsm['{args.mana_out_key}'], got shape {rep.shape}."
+            )
+        n_obs, n_dim = rep.shape
+        print(f"STEP: Preparing GMM input ({n_obs} cells x {n_dim} dims)")
+        max_dims = int(getattr(args, "mana_gmm_max_dims", 30))
+        if max_dims > 0 and n_dim > max_dims:
+            n_components = min(max_dims, max(2, n_obs - 1))
+            print(f"STEP: Reducing MANA representation for GMM with PCA ({n_dim} -> {n_components} dims)")
+            pca = PCA(n_components=n_components, random_state=args.mana_gmm_random_state)
+            rep = pca.fit_transform(rep).astype(np.float32, copy=False)
+
         for token in component_tokens:
             n_components = int(token)
             key = f"compartment_gmm_k{n_components}"
@@ -473,15 +487,69 @@ def run_compartment_clustering(
 
 
 def preprocess_for_clustering(ad: sc.AnnData, args) -> None:
+    filter_for_clustering(ad, args)
+    normalize_for_clustering(ad, args)
+
+
+def filter_for_clustering(ad: sc.AnnData, args) -> None:
     print("STEP: Filtering cells by min counts")
     sc.pp.filter_cells(ad, min_counts=args.min_counts)
     print("STEP: Filtering cells by min genes")
     sc.pp.filter_cells(ad, min_genes=args.min_genes)
 
+
+def normalize_for_clustering(ad: sc.AnnData, args) -> None:
     print("STEP: Normalizing counts")
     sc.pp.normalize_total(ad, inplace=True, target_sum=args.target_sum)
     print("STEP: Log1p transform")
     sc.pp.log1p(ad)
+
+
+def prepare_scvi_representation(ad: sc.AnnData, args) -> str:
+    latent_key = getattr(args, "scvi_latent_key", "X_scVI")
+    if latent_key in ad.obsm:
+        return latent_key
+
+    try:
+        import scvi
+    except ImportError as exc:
+        raise ImportError(
+            "scVI representation requested for MANA, but scvi-tools is not installed. "
+            "Install scvi-tools or switch MANA representation mode."
+        ) from exc
+
+    batch_key = getattr(args, "scvi_batch_key", None)
+    if batch_key and batch_key not in ad.obs.columns:
+        print(f"STEP: scVI batch key '{batch_key}' not found; continuing without batch_key")
+        batch_key = None
+
+    hvg_top_genes = int(getattr(args, "scvi_hvg_top_genes", 500))
+    hvg_flavor = str(getattr(args, "scvi_hvg_flavor", "seurat_v3"))
+    print(f"STEP: Selecting HVGs for scVI (n_top_genes={hvg_top_genes}, flavor={hvg_flavor})")
+    sc.pp.highly_variable_genes(ad, n_top_genes=hvg_top_genes, flavor=hvg_flavor)
+    if "highly_variable" not in ad.var.columns:
+        raise ValueError("Failed to compute highly variable genes for scVI preparation.")
+    ad_scvi = ad[:, ad.var["highly_variable"]].copy()
+    if ad_scvi.n_vars == 0:
+        raise ValueError("No highly variable genes selected for scVI.")
+    if "counts" not in ad_scvi.layers:
+        ad_scvi.layers["counts"] = ad_scvi.X.copy()
+
+    print("STEP: Preparing scVI model")
+    scvi.model.SCVI.setup_anndata(ad_scvi, layer="counts", batch_key=batch_key)
+    model = scvi.model.SCVI(
+        ad_scvi,
+        n_latent=int(getattr(args, "scvi_n_latent", 30)),
+    )
+    print("STEP: Training scVI model")
+    model.train(
+        max_epochs=int(getattr(args, "scvi_max_epochs", 30)),
+        early_stopping=True,
+        enable_progress_bar=True,
+    )
+    print("STEP: Extracting scVI latent representation")
+    ad.obsm[latent_key] = model.get_latent_representation(ad_scvi).astype(np.float32, copy=False)
+    return latent_key
 
 
 def _infer_spatial_from_obs(ad: sc.AnnData) -> Optional[np.ndarray]:
@@ -546,12 +614,56 @@ def maybe_run_mana(
 
         print("STEP: Building spatial neighbors graph")
         print("Building spatial neighbors graph with squidpy...")
-        sq.gr.spatial_neighbors(ad, coord_type="generic", delaunay=True)
+        library_key = None
+        if sample_key and sample_key in ad.obs.columns:
+            library_key = sample_key
+        elif "sample_id" in ad.obs.columns:
+            library_key = "sample_id"
+
+        key_added = (
+            connectivity_key.removesuffix("_connectivities")
+            if connectivity_key.endswith("_connectivities")
+            else "spatial"
+        )
+        print(
+            f"Spatial neighbors config: key_added='{key_added}', library_key='{library_key}', delaunay=True"
+        )
+        sq.gr.spatial_neighbors(
+            ad,
+            coord_type="generic",
+            delaunay=True,
+            key_added=key_added,
+            library_key=library_key,
+        )
+
+        generated_connectivity_key = f"{key_added}_connectivities"
+        generated_distance_key = f"{key_added}_distances"
+        if connectivity_key != generated_connectivity_key and generated_connectivity_key in ad.obsp:
+            ad.obsp[connectivity_key] = ad.obsp[generated_connectivity_key]
+            custom_distance_key = connectivity_key.replace("_connectivities", "_distances")
+            if generated_distance_key in ad.obsp and custom_distance_key not in ad.obsp:
+                ad.obsp[custom_distance_key] = ad.obsp[generated_distance_key]
+            print(
+                f"Aliased connectivity key '{generated_connectivity_key}' -> '{connectivity_key}'"
+            )
+
+        try:
+            import cellcharter as cc
+
+            print("STEP: Removing long spatial links (cellcharter)")
+            cc.gr.remove_long_links(ad)
+        except ImportError:
+            pass
 
         if connectivity_key not in ad.obsp:
             raise KeyError(
                 f"Expected connectivity key '{connectivity_key}' after squidpy graph build, but not found."
             )
+
+    resolved_use_rep = use_rep
+    if resolved_use_rep is None and "X_pca" in ad.obsm:
+        resolved_use_rep = "X_pca"
+        print("STEP: Using X_pca as input representation for MANA aggregation")
 
     print("STEP: Computing weighted neighborhood representation")
     print("Running MANA weighted aggregation...")
@@ -560,7 +672,7 @@ def maybe_run_mana(
         n_layers=n_layers,
         aggregations="mean",
         connectivity_key=connectivity_key,
-        use_rep=use_rep,
+        use_rep=resolved_use_rep,
         sample_key=sample_key,
         out_key=out_key,
         hop_decay=hop_decay,
