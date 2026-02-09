@@ -165,6 +165,25 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--spatial-no-remove-long-links",
+        dest="spatial_remove_long_links",
+        action="store_false",
+        help=(
+            "Disable cellcharter-based pruning of long edges in spatial neighbor graphs "
+            "(enabled by default)."
+        ),
+    )
+    parser.add_argument(
+        "--spatial-long-links-percentile",
+        type=float,
+        default=99.0,
+        help=(
+            "Distance percentile used by cellcharter.gr.remove_long_links "
+            "to prune long spatial edges (default: 99.0)."
+        ),
+    )
+    parser.set_defaults(spatial_remove_long_links=True)
+    parser.add_argument(
         "--leiden-resolutions",
         default="0.1,0.5,1,1.5,2",
         help="Comma-separated Leiden resolutions.",
@@ -516,6 +535,8 @@ def main() -> None:
             out_key=args.mana_out_key,
             normalize_weights=args.mana_normalize_weights,
             include_self=args.mana_include_self,
+            remove_long_links=args.spatial_remove_long_links,
+            long_links_percentile=args.spatial_long_links_percentile,
         )
         print("STEP: Running compartment clustering")
         compartment_result = run_compartment_clustering(ad_clustered, args, data_out_dir)
@@ -527,6 +548,8 @@ def main() -> None:
         "cluster_method": args.cluster_method,
         "cluster_graph_mode_requested": args.cluster_graph_mode,
         "cluster_graph_mode_resolved": cluster_graph_mode,
+        "spatial_remove_long_links": args.spatial_remove_long_links,
+        "spatial_long_links_percentile": args.spatial_long_links_percentile,
         "count_matrix_mode": args.count_matrix_mode,
         "tx_max_distance_um": args.tx_max_distance_um,
         "tx_nucleus_distance_key": args.tx_nucleus_distance_key,

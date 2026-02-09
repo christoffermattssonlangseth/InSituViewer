@@ -532,6 +532,8 @@ def run_clustering(
     spatial_key = getattr(args, "cluster_spatial_key", "spatial")
     connectivity_key = getattr(args, "cluster_connectivity_key", "spatial_connectivities")
     sample_key = getattr(args, "cluster_sample_key", "sample_id")
+    remove_long_links = bool(getattr(args, "spatial_remove_long_links", True))
+    long_links_percentile = float(getattr(args, "spatial_long_links_percentile", 99.0))
 
     if requested_graph_mode not in {"auto", "expression", "spatial"}:
         raise ValueError(
@@ -557,6 +559,8 @@ def run_clustering(
             spatial_key=spatial_key,
             connectivity_key=connectivity_key,
             sample_key=sample_key,
+            remove_long_links=remove_long_links,
+            long_links_percentile=long_links_percentile,
         )
         spatial_graph_ready = spatial_neighbors_key in ad.uns
         if not spatial_graph_ready:
@@ -905,12 +909,60 @@ def _neighbors_key_from_connectivity_key(connectivity_key: str) -> str:
     return connectivity_key
 
 
+def _distance_key_from_connectivity_key(connectivity_key: str) -> str:
+    if connectivity_key.endswith("_connectivities"):
+        return connectivity_key[: -len("_connectivities")] + "_distances"
+    return f"{connectivity_key}_distances"
+
+
+def _remove_long_spatial_links(
+    ad: sc.AnnData,
+    *,
+    connectivity_key: str,
+    long_links_percentile: float,
+) -> None:
+    if not 0.0 < float(long_links_percentile) <= 100.0:
+        raise ValueError(
+            "--spatial-long-links-percentile must be in (0, 100]. "
+            f"Got: {long_links_percentile}"
+        )
+
+    distance_key = _distance_key_from_connectivity_key(connectivity_key)
+    neighbors_key = _neighbors_key_from_connectivity_key(connectivity_key)
+
+    try:
+        import cellcharter as cc
+    except ImportError as exc:
+        raise ImportError(
+            "Long-link removal requested, but cellcharter is not installed. "
+            "Install cellcharter or run with --spatial-no-remove-long-links."
+        ) from exc
+
+    kwargs: dict[str, object] = {
+        "distance_percentile": float(long_links_percentile),
+    }
+    if connectivity_key in ad.obsp:
+        kwargs["connectivity_key"] = connectivity_key
+    if distance_key in ad.obsp:
+        kwargs["distances_key"] = distance_key
+    if neighbors_key in ad.uns:
+        kwargs["neighs_key"] = neighbors_key
+
+    print(
+        "STEP: Removing long spatial links "
+        f"(cellcharter, percentile={float(long_links_percentile):.2f})"
+    )
+    cc.gr.remove_long_links(ad, **kwargs)
+
+
 def ensure_spatial_connectivities(
     ad: sc.AnnData,
     *,
     spatial_key: str,
     connectivity_key: str,
     sample_key: Optional[str] = None,
+    remove_long_links: bool = True,
+    long_links_percentile: float = 99.0,
 ) -> str:
     if not ensure_spatial_coordinates(
         ad,
@@ -922,6 +974,12 @@ def ensure_spatial_connectivities(
         )
 
     if connectivity_key in ad.obsp:
+        if remove_long_links:
+            _remove_long_spatial_links(
+                ad,
+                connectivity_key=connectivity_key,
+                long_links_percentile=long_links_percentile,
+            )
         return connectivity_key
 
     try:
@@ -963,13 +1021,12 @@ def ensure_spatial_connectivities(
             f"Aliased connectivity key '{generated_connectivity_key}' -> '{connectivity_key}'"
         )
 
-    try:
-        import cellcharter as cc
-
-        print("STEP: Removing long spatial links (cellcharter)")
-        cc.gr.remove_long_links(ad)
-    except ImportError:
-        pass
+    if remove_long_links:
+        _remove_long_spatial_links(
+            ad,
+            connectivity_key=connectivity_key,
+            long_links_percentile=long_links_percentile,
+        )
 
     if connectivity_key not in ad.obsp:
         raise KeyError(
@@ -994,6 +1051,8 @@ def maybe_run_mana(
     out_key: str,
     normalize_weights: bool,
     include_self: bool,
+    remove_long_links: bool,
+    long_links_percentile: float,
 ) -> None:
     if not enabled:
         return
@@ -1003,6 +1062,8 @@ def maybe_run_mana(
         spatial_key=spatial_key,
         connectivity_key=connectivity_key,
         sample_key=sample_key,
+        remove_long_links=remove_long_links,
+        long_links_percentile=long_links_percentile,
     )
 
     resolved_use_rep = use_rep

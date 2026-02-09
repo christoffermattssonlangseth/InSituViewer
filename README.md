@@ -34,7 +34,9 @@ pip install -r requirements-optional.txt
 - `louvain` is required only when using Louvain clustering.
 - `scvi-tools` is required when using scVI latent representation for MANA.
 - `cellcharter` is optional and used to remove long spatial links after graph construction.
+- `pyarrow` (or another parquet backend) is recommended when using transcript-level count matrix mode (`nucleus_or_distance`).
 - MANA spatial graph is built per sample (`library_key=sample_id` when available) to avoid cross-sample edges.
+- Long spatial edges are pruned with `cellcharter.gr.remove_long_links` by default after graph construction.
 - Embedded KaroSpace in-app requires `PySide6.QtWebEngineWidgets`.
   Depending on Python and platform, this may come from `PySide6` directly or require:
 
@@ -120,17 +122,21 @@ This will produce `dist/InSituCore-portable.zip`.
 - `Run depth = Direct folders only` for `/dataset/output-*`.
 - `Run depth = One level below samples` for `/dataset/sample_x/output-*`.
 3. Choose sample ID source (`Auto`, `From run label`, `From parent folder`).
-4. Optional: enable `MANA weighted aggregation`.
-5. Optional: enable `Export KaroSpace HTML`.
-6. Optional: open `Analysis` tab and click `Show advanced parameters` to configure:
+4. Choose `Count matrix mode`:
+- `Standard Xenium cell matrix` uses `cell_feature_matrix.h5`.
+- `Nucleus OR distance-filtered transcripts` builds counts from `transcripts.parquet` using:
+  `overlaps_nucleus OR nucleus_distance <= Tx max distance (um)`.
+5. Optional: enable `MANA weighted aggregation`.
+6. Optional: enable `Export KaroSpace HTML`.
+7. Optional: open `Analysis` tab and click `Show advanced parameters` to configure:
 - neighbors / PCs / UMAP min_dist
 - clustering method (`Leiden`, `Louvain`, or `KMeans`)
 - method-specific sweep values (resolutions or K list)
-7. In `Run` -> `Optional Steps`, choose MANA representation (`scVI` recommended).
-8. Click `Run`.
-9. Use top-bar actions: `Load Outputs`, `Generate UMAP`, `Generate Compartments`.
-10. Use `Spatial (Static)` tab for `Generate Spatial Map` (fast native plot) and `Spatial (Interactive)` for KaroSpace.
-11. For compartments, choose a compartment key in the `Compartment Map` tab:
+8. In `Run` -> `Optional Steps`, choose MANA representation (`scVI` recommended).
+9. Click `Run`.
+10. Use top-bar actions: `Load Outputs`, `Generate UMAP`, `Generate Compartments`.
+11. Use `Spatial (Static)` tab for `Generate Spatial Map` (fast native plot) and `Spatial (Interactive)` for KaroSpace.
+12. For compartments, choose a compartment key in the `Compartment Map` tab:
 - `Auto (primary)` uses the pipeline-selected default.
 - Or choose a specific key like `compartment_gmm_k6` / `compartment_leiden_1.0`.
 
@@ -159,6 +165,22 @@ Nested sample folders:
       cells.csv.gz
 ```
 
+Transcript-derived count matrix mode (`nucleus_or_distance`):
+
+```text
+/dataset/
+  output-.../
+    transcripts.parquet          # file or parquet shard directory
+    cells.parquet                # preferred
+    # or cells.csv.gz
+```
+
+The transcript filter matches your notebook workflow:
+
+- keep transcript if `overlaps_nucleus == True`
+- OR if `nucleus_distance <= --tx-max-distance-um`
+- and keep only configured categories (default: `predesigned_gene,custom_gene`)
+
 ## Outputs
 
 Written under `--out-dir`:
@@ -186,14 +208,31 @@ python3 run_xenium_analysis.py \
   --out-dir /absolute/path/to/output
 ```
 
+Example using transcript-derived count matrix (nucleus OR <= 5 um):
+
+```bash
+python3 run_xenium_analysis.py \
+  --data-dir /absolute/path/to/dataset \
+  --out-dir /absolute/path/to/output \
+  --count-matrix-mode nucleus_or_distance \
+  --tx-max-distance-um 5 \
+  --tx-nucleus-distance-key nucleus_distance
+```
+
 Useful options:
 
 - `--run-prefix`
 - `--run-search-depth` (`1` or `2`)
 - `--sample-id-source` (`auto`, `run`, `parent`)
+- `--count-matrix-mode` (`cell_feature_matrix`, `nucleus_or_distance`)
+- `--tx-max-distance-um` (default `5.0`)
+- `--tx-nucleus-distance-key` (default `nucleus_distance`; auto-infers common names if missing)
+- `--tx-allowed-categories` (default `predesigned_gene,custom_gene`)
 - `--cluster-method` (`leiden`, `louvain`, `kmeans`)
 - `--n-neighbors`, `--n-pcs`, `--umap-min-dist`
 - `--leiden-resolutions`, `--louvain-resolutions`, `--kmeans-clusters`
+- `--spatial-long-links-percentile` (default `99.0`)
+- `--spatial-no-remove-long-links` (disables long-link pruning)
 - `--mana-aggregate`
 - `--mana-representation-mode` (`scvi`, `pca`, `custom`, `auto`; default `scvi`)
 - `--scvi-latent-key`, `--scvi-n-latent`, `--scvi-max-epochs` (default `30`)
