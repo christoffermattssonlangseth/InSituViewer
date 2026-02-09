@@ -22,6 +22,32 @@ from utils.xenium_pipeline import (
 )
 
 
+def _sanitize_obs_for_h5ad(ad: sc.AnnData) -> None:
+    idx_name = ad.obs.index.name
+    if not idx_name:
+        return
+    if idx_name not in ad.obs.columns:
+        return
+
+    idx_vals = ad.obs.index.astype(str).to_numpy()
+    col_vals = ad.obs[idx_name].astype(str).to_numpy()
+    if len(idx_vals) != len(col_vals):
+        return
+    if (idx_vals == col_vals).all():
+        return
+
+    new_name = f"{idx_name}_column"
+    suffix = 1
+    while new_name in ad.obs.columns:
+        suffix += 1
+        new_name = f"{idx_name}_column_{suffix}"
+
+    ad.obs.rename(columns={idx_name: new_name}, inplace=True)
+    print(
+        f"STEP: Renaming conflicting obs column '{idx_name}' to '{new_name}' for h5ad compatibility"
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run Xenium analysis from a dataset path.")
     parser.add_argument(
@@ -259,6 +285,7 @@ def main() -> None:
 
     print("STEP: Saving raw AnnData")
     raw_path = data_out_dir / "raw.h5ad"
+    _sanitize_obs_for_h5ad(ad)
     ad.write(raw_path)
     print(f"Saved raw AnnData: {raw_path}")
 
@@ -301,6 +328,7 @@ def main() -> None:
     print("STEP: Saving clustered outputs")
     (data_out_dir / "cluster_info.json").write_text(json.dumps(cluster_info, indent=2))
     clustered_path = data_out_dir / "clustered.h5ad"
+    _sanitize_obs_for_h5ad(ad_clustered)
     ad_clustered.write(clustered_path)
 
     print(f"Saved clustered AnnData: {clustered_path}")
