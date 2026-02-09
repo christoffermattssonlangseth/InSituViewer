@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check local Python environment for InSituViewer dependencies."""
+"""Check local Python environment for InSituCore dependencies."""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ def _check_group(group_name: str, items: list[tuple[str, str]]) -> list[tuple[st
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Check dependencies for InSituViewer.")
+    parser = argparse.ArgumentParser(description="Check dependencies for InSituCore.")
     parser.add_argument(
         "--require-optional",
         action="store_true",
@@ -59,7 +59,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    print("InSituViewer environment check")
+    print("InSituCore environment check")
     print(f"Python: {sys.version.split()[0]}")
 
     core_rows = _check_group("Core dependencies", CORE_MODULES)

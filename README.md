@@ -1,8 +1,8 @@
-![InSituViewer](assets/logo.png)
+![InSituCore](assets/logo.png)
 
 Local desktop app for Xenium-style spatial transcriptomics analysis.
 
-`InSituViewer` lets you run the pipeline and inspect results in one place:
+`InSituCore` lets you run the pipeline and inspect results in one place:
 - QC plots
 - Spatial maps (KaroSpace)
 - UMAP
@@ -136,11 +136,12 @@ Useful options:
 
 ## Visual themes
 
-- App name: `InSituViewer`
+- App name: `InSituCore`
 - Themes: `app/theme_light.qss` and `app/theme_dark.qss`
-- Toggle in top bar: `Dark` / `Light`
+- Startup behavior: detects system appearance (dark/light) automatically
+- Toggle in top bar: `Dark` / `Light` (manual override)
 
 ## Project notes
 
-- Recent runs are stored at `~/.spatial-analysis-for-dummies/recent.json`.
+- Recent runs are stored at `~/.insitucore/recent.json`.
 - Utility modules are vendored under `utils/` (`MANA` + `KaroSpace` helpers).

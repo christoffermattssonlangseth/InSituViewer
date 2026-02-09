@@ -20,7 +20,8 @@ except Exception:
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-RECENT_PATH = Path.home() / ".spatial-analysis-for-dummies" / "recent.json"
+RECENT_PATH = Path.home() / ".insitucore" / "recent.json"
+LEGACY_RECENT_PATH = Path.home() / ".spatial-analysis-for-dummies" / "recent.json"
 THEME_LIGHT_PATH = Path(__file__).with_name("theme_light.qss")
 THEME_DARK_PATH = Path(__file__).with_name("theme_dark.qss")
 
@@ -37,10 +38,11 @@ class RecentProject:
 
 
 def _load_recent() -> List[RecentProject]:
-    if not RECENT_PATH.exists():
+    path = RECENT_PATH if RECENT_PATH.exists() else LEGACY_RECENT_PATH
+    if not path.exists():
         return []
     try:
-        payload = json.loads(RECENT_PATH.read_text())
+        payload = json.loads(path.read_text())
     except json.JSONDecodeError:
         return []
     projects: List[RecentProject] = []
@@ -75,7 +77,7 @@ def _save_recent(projects: List[RecentProject]) -> None:
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("InSituViewer")
+        self.setWindowTitle("InSituCore")
         self.resize(1200, 800)
 
         self.process: Optional[QtCore.QProcess] = None
@@ -88,13 +90,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_out_dir: Optional[Path] = None
         self.current_karospace_html: Optional[Path] = None
         self.recent_projects: List[RecentProject] = _load_recent()
-        self._theme_mode = "light"
+        self._theme_mode = self._detect_system_theme()
+        self._manual_theme_override = False
 
         self._build_ui()
         self._busy_timer = QtCore.QTimer(self)
         self._busy_timer.setInterval(280)
         self._busy_timer.timeout.connect(self._animate_busy_state)
         self._apply_theme(self._theme_mode)
+        self._connect_system_theme_signal()
         self._populate_recent()
 
     def _build_ui(self) -> None:
@@ -150,7 +154,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         title_col = QtWidgets.QVBoxLayout()
         title_col.setSpacing(1)
-        title = QtWidgets.QLabel("InSituViewer")
+        title = QtWidgets.QLabel("InSituCore")
         title.setObjectName("TopTitle")
         subtitle = QtWidgets.QLabel("Local Spatial Analysis")
         subtitle.setObjectName("TopSubtitle")
@@ -411,6 +415,49 @@ class MainWindow(QtWidgets.QMainWindow):
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_view.appendPlainText(f"[{timestamp}] {message}")
 
+    def _collect_existing_pipeline_outputs(
+        self,
+        out_dir: Path,
+        karospace_path: Optional[Path],
+    ) -> List[Path]:
+        candidates = [
+            out_dir / "data" / "raw.h5ad",
+            out_dir / "data" / "clustered.h5ad",
+            out_dir / "data" / "cluster_info.json",
+            out_dir / "data" / "markers_by_cluster.csv",
+            out_dir / "xenium_qc" / "summary_by_run.csv",
+            out_dir / "xenium_qc" / "gene_detection_overall.csv",
+            out_dir / "plots" / "umap.png",
+            out_dir / "plots" / "compartments.png",
+        ]
+        if karospace_path is not None:
+            candidates.append(karospace_path)
+        return [p for p in candidates if p.exists()]
+
+    def _confirm_overwrite(
+        self,
+        paths: List[Path],
+        *,
+        title: str,
+        prompt: str,
+    ) -> bool:
+        if not paths:
+            return True
+        shown = [str(p) for p in paths[:10]]
+        details = "\n".join(shown)
+        if len(paths) > 10:
+            details += f"\n... and {len(paths) - 10} more"
+
+        msg = QtWidgets.QMessageBox(self)
+        msg.setIcon(QtWidgets.QMessageBox.Warning)
+        msg.setWindowTitle(title)
+        msg.setText(prompt)
+        msg.setInformativeText("Existing files will be replaced.")
+        msg.setDetailedText(details)
+        msg.setStandardButtons(QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
+        msg.setDefaultButton(QtWidgets.QMessageBox.No)
+        return msg.exec() == QtWidgets.QMessageBox.Yes
+
     def _enter_busy(self, stage_text: str) -> None:
         if self._busy_counter == 0:
             self._busy_has_error = False
@@ -473,9 +520,42 @@ class MainWindow(QtWidgets.QMainWindow):
     def _theme_path(self) -> Path:
         return THEME_DARK_PATH if self._theme_mode == "dark" else THEME_LIGHT_PATH
 
+    def _detect_system_theme(self) -> str:
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            return "light"
+
+        style_hints = app.styleHints()
+        color_scheme = getattr(style_hints, "colorScheme", lambda: None)()
+        dark_enum = getattr(getattr(QtCore.Qt, "ColorScheme", object), "Dark", None)
+        light_enum = getattr(getattr(QtCore.Qt, "ColorScheme", object), "Light", None)
+        if dark_enum is not None and color_scheme == dark_enum:
+            return "dark"
+        if light_enum is not None and color_scheme == light_enum:
+            return "light"
+
+        # Fallback for environments without colorScheme support.
+        bg = app.palette().color(QtGui.QPalette.Window)
+        return "dark" if bg.lightness() < 128 else "light"
+
+    def _connect_system_theme_signal(self) -> None:
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            return
+        style_hints = app.styleHints()
+        signal = getattr(style_hints, "colorSchemeChanged", None)
+        if signal is not None:
+            signal.connect(self._on_system_color_scheme_changed)
+
     def _toggle_theme(self, checked: bool) -> None:
+        self._manual_theme_override = True
         self._theme_mode = "dark" if checked else "light"
         self._apply_theme(self._theme_mode)
+
+    def _on_system_color_scheme_changed(self, _scheme: object) -> None:
+        if self._manual_theme_override:
+            return
+        self._apply_theme(self._detect_system_theme())
 
     def _apply_theme(self, mode: Optional[str] = None) -> None:
         if mode in {"light", "dark"}:
@@ -497,6 +577,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if not data_dir or not out_dir:
             QtWidgets.QMessageBox.warning(self, "Missing paths", "Please set data and output directories.")
             return
+
+        out_dir_path = Path(out_dir).expanduser().resolve()
+        karospace_path_obj: Optional[Path] = None
 
         args = [
             sys.executable,
@@ -528,9 +611,22 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.karospace_check.isChecked():
             karospace_path = self.karospace_path_edit.text().strip()
             if not karospace_path:
-                karospace_path = str(Path(out_dir) / "karospace.html")
+                karospace_path = str(out_dir_path / "karospace.html")
                 self.karospace_path_edit.setText(karospace_path)
+            karospace_path_obj = Path(karospace_path).expanduser().resolve()
             args += ["--karospace-html", karospace_path]
+
+        existing_outputs = self._collect_existing_pipeline_outputs(
+            out_dir=out_dir_path,
+            karospace_path=karospace_path_obj,
+        )
+        if not self._confirm_overwrite(
+            existing_outputs,
+            title="Existing outputs found",
+            prompt="Run pipeline and overwrite existing outputs?",
+        ):
+            self._log("Run cancelled by user (existing outputs).")
+            return
 
         self._log("Starting pipeline...")
         self._enter_busy("Running pipeline")
@@ -671,6 +767,13 @@ class MainWindow(QtWidgets.QMainWindow):
         output_dir = self.current_out_dir / "plots"
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / "umap.png"
+        if not self._confirm_overwrite(
+            [output_path] if output_path.exists() else [],
+            title="Existing plot found",
+            prompt="Regenerate UMAP plot and overwrite existing file?",
+        ):
+            self._log("UMAP generation cancelled by user.")
+            return
 
         args = [
             sys.executable,
@@ -699,6 +802,13 @@ class MainWindow(QtWidgets.QMainWindow):
         output_dir = self.current_out_dir / "plots"
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / "compartments.png"
+        if not self._confirm_overwrite(
+            [output_path] if output_path.exists() else [],
+            title="Existing plot found",
+            prompt="Regenerate compartment plot and overwrite existing file?",
+        ):
+            self._log("Compartment generation cancelled by user.")
+            return
 
         args = [
             sys.executable,
