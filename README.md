@@ -105,6 +105,7 @@ Outputs:
 
 - `dist/InSituCore-portable/InSituCore.app`
 - `dist/InSituCore-portable/InSituCore/` (project + local runtime)
+- `dist/InSituCore-portable/environment.yml` (conda environment file)
 - `dist/InSituCore-portable/InSituCore.log`
 
 Create a zip in one step:

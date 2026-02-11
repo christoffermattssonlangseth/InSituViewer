@@ -22,6 +22,7 @@ APP_PATH="${BUNDLE_ROOT}/${APP_NAME}.app"
 VENV_DIR="${PROJECT_DIR}/.venv"
 ICON_ICNS="${PROJECT_DIR}/assets/InSituCore.icns"
 ICON_GEN_SCRIPT="${PROJECT_DIR}/scripts/generate_macos_icon.py"
+ENV_YML="${PROJECT_DIR}/environment.yml"
 
 if ! command -v osacompile >/dev/null 2>&1; then
   echo "osacompile not found. This script is macOS-only." >&2
@@ -45,6 +46,10 @@ rsync -a \
   --exclude '*.pyc' \
   --exclude 'dist' \
   "${REPO_ROOT}/" "${PROJECT_DIR}/"
+
+if [[ -f "${ENV_YML}" ]]; then
+  cp "${ENV_YML}" "${BUNDLE_ROOT}/environment.yml"
+fi
 
 if [[ ! -f "${ICON_ICNS}" && -f "${ICON_GEN_SCRIPT}" ]]; then
   python3 "${ICON_GEN_SCRIPT}" || true

@@ -1,0 +1,9 @@
+name: insitucore
+channels:
+  - conda-forge
+dependencies:
+  - python
+  - pip
+  - pip:
+      - -r requirements.txt
+      - -r requirements-optional.txt
